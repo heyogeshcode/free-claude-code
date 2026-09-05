@@ -104,6 +104,10 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
         return {"type": "OBJECT", "properties": {}}
 
     result = dict(schema)
+    # Strip keywords unsupported by Google Gemini schema validator
+    for forbidden in ("$schema", "additionalProperties", "title", "$defs", "definitions"):
+        result.pop(forbidden, None)
+
     # Ensure type is uppercase or valid JSON schema
     schema_type = result.get("type")
     if isinstance(schema_type, str):
@@ -247,7 +251,9 @@ def _build_contents(
                     # Wrap in functionResponse
                     part = {
                         "functionResponse": {
-                            "name": _find_tool_name_by_id(messages, tool_use_id)
+                            "name": _find_tool_name_by_id(
+                                messages, tool_use_id, signature_cache
+                            )
                             or "tool",
                             "response": {"content": result_str},
                             "id": tool_use_id,
@@ -269,7 +275,11 @@ def _build_contents(
     return merged
 
 
-def _find_tool_name_by_id(messages: list[Any], tool_id: str) -> str | None:
+def _find_tool_name_by_id(
+    messages: list[Any],
+    tool_id: str,
+    signature_cache: dict[str, str] | None = None,
+) -> str | None:
     for msg in messages:
         content = getattr(msg, "content", None) or (
             msg.get("content") if isinstance(msg, dict) else None
@@ -284,6 +294,10 @@ def _find_tool_name_by_id(messages: list[Any], tool_id: str) -> str | None:
                 )
                 if bid == tool_id and bname:
                     return bname
+    if signature_cache:
+        cached_name = signature_cache.get(f"name_{tool_id}")
+        if cached_name:
+            return cached_name
     return None
 
 
@@ -423,6 +437,7 @@ class AntigravityStreamTranslator:
                     )
 
                     # If this part also has thoughtSignature, record it for this tool call ID
+                    self.signature_cache[f"name_{call_id}"] = fn_name
                     if sig:
                         self.signature_cache[call_id] = sig
                         self.signature_cache[fn_name] = sig

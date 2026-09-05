@@ -41,6 +41,7 @@ from free_claude_code.config.provider_catalog import (
     ZENMUX_DEFAULT_BASE,
 )
 from free_claude_code.providers.admission import ProviderAdmissionController
+from free_claude_code.providers.antigravity import AntigravityProvider
 from free_claude_code.providers.cloudflare import CloudflareProvider
 from free_claude_code.providers.deepseek import DeepSeekProvider
 from free_claude_code.providers.gemini import GeminiProvider
@@ -896,6 +897,7 @@ def test_create_provider_instantiates_each_builtin():
         "sambanova": OpenAIChatProvider,
         "kilo": KiloProvider,
         "cerebras": OpenAIChatProvider,
+        "antigravity": AntigravityProvider,
     }
     sentinel_admission = MagicMock(spec=ProviderAdmissionController)
     auth = MagicMock()
@@ -906,6 +908,11 @@ def test_create_provider_instantiates_each_builtin():
             admission=admission,
         ),
         "github_copilot": lambda config, _settings, admission: GitHubCopilotProvider(
+            config,
+            auth=auth,
+            admission=admission,
+        ),
+        "antigravity": lambda config, _settings, admission: AntigravityProvider(
             config,
             auth=auth,
             admission=admission,

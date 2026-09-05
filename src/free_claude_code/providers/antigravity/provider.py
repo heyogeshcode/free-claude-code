@@ -1,8 +1,9 @@
 """Antigravity provider implementation using Google Cloud Code / Antigravity API."""
 
 import asyncio
+import sys
 from collections.abc import AsyncIterator
-from typing import cast
+from typing import Any, cast
 
 import httpx
 from loguru import logger
@@ -23,10 +24,11 @@ from free_claude_code.core.openai_responses import (
 from free_claude_code.core.reasoning import DEFAULT_REASONING_POLICY, ReasoningPolicy
 from free_claude_code.providers.admission import (
     ProviderAdmissionController,
+    ProviderExecution,
     ProviderOperationKind,
 )
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
-from free_claude_code.providers.http import ProviderAttemptScope
+from free_claude_code.providers.http import ProviderAttemptScope, maybe_await_aclose
 
 from .auth import AntigravityAuthManager
 from .models import (
@@ -95,6 +97,17 @@ class AntigravityProvider(BaseProvider):
         if not request.model.strip():
             raise InvalidRequestError("Model name cannot be empty.")
 
+        sanitized = _sanitize_responses_request(request)
+        options = NativeMessagesOptions(
+            model=sanitized.model,
+            max_tokens=sanitized.max_output_tokens or 8192,
+        )
+        build_responses_messages_request(
+            sanitized,
+            options=options,
+            replay_scope="antigravity",
+        )
+
     async def list_model_infos(self) -> frozenset[ProviderModelInfo]:
         """Fetch live models from Antigravity backend with offline fallback."""
         if not self._auth.is_connected():
@@ -128,7 +141,7 @@ class AntigravityProvider(BaseProvider):
 
         return frozenset(DEFAULT_ANTIGRAVITY_MODELS)
 
-    async def stream_messages(
+    def stream_messages(
         self,
         request: MessagesRequest,
         input_tokens: int = 0,
@@ -139,8 +152,54 @@ class AntigravityProvider(BaseProvider):
     ) -> AsyncIterator[str]:
         """Stream Anthropic SSE response from Antigravity streamGenerateContent."""
         self.preflight_messages(request, reasoning=reasoning)
+        return self._stream_messages(
+            request,
+            input_tokens=input_tokens,
+            request_id=request_id,
+            response_model=response_model,
+            reasoning=reasoning,
+        )
 
+    async def _stream_messages(
+        self,
+        request: MessagesRequest,
+        input_tokens: int = 0,
+        *,
+        request_id: str | None = None,
+        response_model: str | None = None,
+        reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
+    ) -> AsyncIterator[str]:
         execution = self._admission.start_execution(request_id=request_id)
+        run = self._run_messages(
+            request,
+            input_tokens=input_tokens,
+            execution=execution,
+            response_model=response_model,
+            reasoning=reasoning,
+        )
+        try:
+            async for event in run:
+                yield event
+        except (asyncio.CancelledError, GeneratorExit):
+            raise
+        except Exception as error:
+            execution.fail(error)
+            raise
+        else:
+            execution.succeed()
+        finally:
+            await maybe_await_aclose(run)
+            execution.abandon()
+
+    async def _run_messages(
+        self,
+        request: MessagesRequest,
+        *,
+        input_tokens: int,
+        execution: ProviderExecution,
+        response_model: str | None,
+        reasoning: ReasoningPolicy,
+    ) -> AsyncIterator[str]:
         public_model = response_model or request.model
         translator = AntigravityStreamTranslator(
             public_model,
@@ -179,18 +238,13 @@ class AntigravityProvider(BaseProvider):
                         req = self._client.build_request(
                             "POST", url, json=payload, headers=headers
                         )
-                        response = scope.retain(
-                            await self._client.send(req, stream=True)
-                        )
-                        if response.status_code == 404:
-                            await response.aclose()
-                            response = None
+                        res = await self._client.send(req, stream=True)
+                        if res.status_code == 404:
+                            await res.aclose()
                             continue
+                        response = res
                         break
-                    except httpx.ConnectError, httpx.TimeoutException:
-                        if response is not None:
-                            await response.aclose()
-                        response = None
+                    except (httpx.ConnectError, httpx.TimeoutException):
                         continue
 
                 if response is None:
@@ -204,7 +258,9 @@ class AntigravityProvider(BaseProvider):
                 if response.status_code == 401:
                     # Token might have been revoked; force refresh
                     await response.aclose()
-                    access = await self._auth.access(force_refresh=True)
+                    await self._auth.access(force_refresh=True)
+                    await scope.aclose(active_error=None)
+                    scope = None
                     continue
 
                 if response.status_code == 429:
@@ -228,22 +284,26 @@ class AntigravityProvider(BaseProvider):
                         response.status_code >= 500,
                     )
 
+                scope.retain(response)
+
                 async for line in response.aiter_lines():
                     events = translator.process_line(line)
+                    if events and not attempt.accepted:
+                        await attempt.accept()
                     for ev in events:
                         yield ev
 
                 for ev in translator.finalize():
+                    if not attempt.accepted:
+                        await attempt.accept()
                     yield ev
 
-                execution.succeed()
                 return
 
-            except asyncio.CancelledError, GeneratorExit:
+            except (asyncio.CancelledError, GeneratorExit):
                 raise
             except Exception as exc:
                 if not execution.can_attempt:
-                    execution.fail(exc)
                     if isinstance(exc, ExecutionFailure):
                         raise
                     raise ExecutionFailure(
@@ -252,6 +312,9 @@ class AntigravityProvider(BaseProvider):
                         f"Antigravity stream failed: {exc}",
                         False,
                     ) from exc
+            finally:
+                if scope is not None:
+                    await scope.aclose(active_error=sys.exception())
 
     async def stream_responses(
         self,
@@ -263,47 +326,178 @@ class AntigravityProvider(BaseProvider):
         reasoning: ReasoningPolicy = DEFAULT_REASONING_POLICY,
     ) -> AsyncIterator[str]:
         """Adapt Antigravity stream to OpenAI Responses format."""
+        sanitized = _sanitize_responses_request(request)
         options = NativeMessagesOptions(
-            model=request.model,
-            max_tokens=request.max_output_tokens or 8192,
+            model=sanitized.model,
+            max_tokens=sanitized.max_output_tokens or 8192,
         )
         prepared = build_responses_messages_request(
-            request,
+            sanitized,
             options=options,
             replay_scope="antigravity",
         )
         messages_req = MessagesRequest.model_validate(prepared.body)
         presenter = AnthropicToResponsesStream(
-            request,
-            public_model=response_model or request.model,
+            sanitized,
+            public_model=response_model or sanitized.model,
             tool_identities=prepared.tool_identities,
-            replay_origin=MessagesReplayOrigin("antigravity", request.model),
+            replay_origin=MessagesReplayOrigin("antigravity", sanitized.model),
         )
         for frame in presenter.start():
             yield frame
 
         decoder = AnthropicSSEDecoder()
-        async for sse_chunk in self.stream_messages(
+        stream = self.stream_messages(
             messages_req,
             input_tokens=input_tokens,
             request_id=request_id,
             response_model=response_model,
             reasoning=reasoning,
-        ):
-            for event in decoder.feed(sse_chunk):
+        )
+        try:
+            async for sse_chunk in stream:
+                for event in decoder.feed(sse_chunk):
+                    payload = cast(JsonObject, event.data)
+                    kind = event.event or payload.get("type")
+                    if isinstance(kind, str) and kind:
+                        for frame in presenter.feed(kind, payload):
+                            yield frame
+            for event in decoder.finish():
                 payload = cast(JsonObject, event.data)
                 kind = event.event or payload.get("type")
                 if isinstance(kind, str) and kind:
                     for frame in presenter.feed(kind, payload):
                         yield frame
-        for event in decoder.finish():
-            payload = cast(JsonObject, event.data)
-            kind = event.event or payload.get("type")
-            if isinstance(kind, str) and kind:
-                for frame in presenter.feed(kind, payload):
-                    yield frame
+        finally:
+            await maybe_await_aclose(stream)
 
     async def cleanup(self) -> None:
         self._closing = True
         if self._owns_client:
             await self._client.aclose()
+
+
+def _sanitize_responses_request(
+    request: OpenAIResponsesRequest,
+) -> OpenAIResponsesRequest:
+    """Sanitize OpenAI Responses request so it strictly satisfies Messages translation requirements.
+
+    Codex and other clients pass fields like truncation='auto', reasoning.summary='none',
+    text.verbosity, and non-function tool definitions (e.g. web_search) which are rejected by
+    strict Messages wire shape converters.
+    """
+    data = request.model_dump(mode="json", exclude_none=True)
+
+    # 1. Truncation: only None or 'disabled' allowed
+    data.pop("truncation", None)
+
+    # 2. Include: only 'reasoning.encrypted_content' allowed
+    if "include" in data:
+        include = data["include"]
+        if isinstance(include, list):
+            filtered = [x for x in include if x == "reasoning.encrypted_content"]
+            if filtered:
+                data["include"] = filtered
+            else:
+                data.pop("include", None)
+        else:
+            data.pop("include", None)
+
+    # 3. Reasoning: keep only effort and summary='auto'
+    if "reasoning" in data:
+        reasoning = data["reasoning"]
+        if isinstance(reasoning, dict):
+            clean_reasoning: dict[str, Any] = {}
+            if "effort" in reasoning and reasoning["effort"] is not None:
+                clean_reasoning["effort"] = reasoning["effort"]
+            if reasoning.get("summary") == "auto":
+                clean_reasoning["summary"] = "auto"
+            if clean_reasoning:
+                data["reasoning"] = clean_reasoning
+            else:
+                data.pop("reasoning", None)
+        else:
+            data.pop("reasoning", None)
+
+    # 4. Text: only format allowed
+    if "text" in data:
+        text_val = data["text"]
+        if isinstance(text_val, dict) and "format" in text_val:
+            data["text"] = {"format": text_val["format"]}
+        else:
+            data.pop("text", None)
+
+    # 5. Tools: only keep function and custom tools
+    valid_tool_names: set[str] = set()
+    if "tools" in data:
+        tools_val = data["tools"]
+        if isinstance(tools_val, list):
+            clean_tools: list[dict[str, Any]] = []
+            for t in tools_val:
+                if isinstance(t, dict) and t.get("type") in ("function", "custom"):
+                    clean_tools.append(t)
+                    if "name" in t and isinstance(t["name"], str):
+                        valid_tool_names.add(t["name"])
+            if clean_tools:
+                data["tools"] = clean_tools
+            else:
+                data.pop("tools", None)
+        else:
+            data.pop("tools", None)
+
+    # 6. Tool choice: ensure valid reference or auto
+    if "tool_choice" in data:
+        choice = data["tool_choice"]
+        if not data.get("tools"):
+            if isinstance(choice, dict) or choice in ("required", "any"):
+                data.pop("tool_choice", None)
+        elif isinstance(choice, dict) and choice.get("name") not in valid_tool_names:
+            data["tool_choice"] = "auto"
+
+    # 7. Input: sanitize message and content blocks
+    if "input" in data and isinstance(data["input"], list):
+        clean_input: list[Any] = []
+        for item in data["input"]:
+            if isinstance(item, str):
+                clean_input.append(item)
+            elif isinstance(item, dict):
+                item_type = item.get("type")
+                if item_type in (None, "message"):
+                    cleaned_item = {
+                        k: v
+                        for k, v in item.items()
+                        if k in ("type", "role", "content", "id", "status")
+                    }
+                    content = cleaned_item.get("content")
+                    if isinstance(content, list):
+                        clean_blocks: list[Any] = []
+                        for block in content:
+                            if isinstance(block, dict):
+                                b_type = block.get("type")
+                                if b_type in ("input_text", "output_text", "text"):
+                                    clean_blocks.append(
+                                        {
+                                            "type": "text"
+                                            if b_type == "text"
+                                            else b_type,
+                                            "text": block.get("text", ""),
+                                        }
+                                    )
+                                elif b_type == "input_image":
+                                    clean_blocks.append(block)
+                                else:
+                                    if "text" in block:
+                                        clean_blocks.append(
+                                            {"type": "text", "text": str(block["text"])}
+                                        )
+                            elif isinstance(block, str):
+                                clean_blocks.append({"type": "text", "text": block})
+                        cleaned_item["content"] = clean_blocks
+                    clean_input.append(cleaned_item)
+                else:
+                    clean_input.append(item)
+            else:
+                clean_input.append(item)
+        data["input"] = clean_input
+
+    return OpenAIResponsesRequest.model_validate(data)

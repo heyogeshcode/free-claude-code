@@ -186,3 +186,179 @@ async def test_stream_responses_adaptation(provider_config):
     finally:
         await provider.cleanup()
         await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_concurrency_release_multiple_requests(provider_config):
+    """Verify that multiple consecutive requests release semaphore permits and do not deadlock."""
+    from free_claude_code.providers.admission import ProviderAdmissionController
+
+    auth = MagicMock(spec=AntigravityAuthManager)
+    auth.is_connected.return_value = True
+    auth.access = AsyncMock(
+        return_value=AntigravityAccess("ya29.test_token", "test_proj")
+    )
+
+    sse_body = (
+        b'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello!"}]}}]}}\n\n'
+        b'data: {"response": {"candidates": [{"finishReason": "STOP"}]}}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    # Strict max_concurrency=2: would deadlock on 3rd request if permits leaked
+    admission = ProviderAdmissionController(
+        provider_name="antigravity",
+        rate_limit=100,
+        rate_window=60,
+        max_concurrency=2,
+    )
+    provider = AntigravityProvider(
+        provider_config,
+        auth=auth,
+        admission=admission,
+        client=client,
+    )
+    try:
+        req = make_messages_request("antigravity/gemini-3.8-flash")
+        for _ in range(5):
+            chunks = [chunk async for chunk in provider.stream_messages(req)]
+            joined = "".join(chunks)
+            assert "Hello!" in joined
+    finally:
+        await provider.cleanup()
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_messages_early_exit_releases_permit(provider_config):
+    """Verify that breaking early from a stream properly closes the scope and releases permit."""
+    from free_claude_code.providers.admission import ProviderAdmissionController
+
+    auth = MagicMock(spec=AntigravityAuthManager)
+    auth.is_connected.return_value = True
+    auth.access = AsyncMock(
+        return_value=AntigravityAccess("ya29.test_token", "test_proj")
+    )
+
+    sse_body = (
+        b'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Part 1"}]}}]}}\n\n'
+        b'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Part 2"}]}}]}}\n\n'
+        b'data: {"response": {"candidates": [{"finishReason": "STOP"}]}}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    admission = ProviderAdmissionController(
+        provider_name="antigravity",
+        rate_limit=100,
+        rate_window=60,
+        max_concurrency=1,  # Only 1 slot!
+    )
+    provider = AntigravityProvider(
+        provider_config,
+        auth=auth,
+        admission=admission,
+        client=client,
+    )
+    try:
+        req = make_messages_request("antigravity/gemini-3.8-flash")
+        # Request 1: break early after first chunk
+        async for _ in provider.stream_messages(req):
+            break
+
+        # Request 2: should succeed immediately if permit was released
+        chunks = [chunk async for chunk in provider.stream_messages(req)]
+        assert len(chunks) > 0
+    finally:
+        await provider.cleanup()
+        await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_codex_stream_responses_sanitization(provider_config):
+    """Verify that Codex requests with truncation, web_search, summary=none, text.verbosity succeed."""
+    auth = MagicMock(spec=AntigravityAuthManager)
+    auth.is_connected.return_value = True
+    auth.access = AsyncMock(
+        return_value=AntigravityAccess("ya29.test_token", "test_proj")
+    )
+
+    sse_body = (
+        b'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Codex result"}]}}]}}\n\n'
+        b'data: {"response": {"candidates": [{"finishReason": "STOP"}]}}\n\n'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            content=sse_body,
+            headers={"Content-Type": "text/event-stream"},
+            request=request,
+        )
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = AntigravityProvider(
+        provider_config,
+        auth=auth,
+        admission=immediate_admission(),
+        client=client,
+    )
+    try:
+        codex_req = OpenAIResponsesRequest(
+            model="antigravity/gemini-3.8-flash",
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "What is the weather?"}
+                    ],
+                }
+            ],
+            tools=[
+                {"type": "web_search"},
+                {
+                    "type": "function",
+                    "name": "bash",
+                    "description": "Run bash command",
+                    "parameters": {
+                        "$schema": "http://json-schema.org/draft-07/schema#",
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "additionalProperties": False,
+                    },
+                },
+            ],
+            tool_choice="auto",
+            parallel_tool_calls=True,
+            reasoning={"effort": "medium", "summary": "none"},
+            truncation="auto",
+            text={"verbosity": "low"},
+        )
+
+        # Preflight should succeed
+        provider.preflight_responses(codex_req)
+
+        # Streaming should succeed without ResponsesConversionError
+        frames = [frame async for frame in provider.stream_responses(codex_req)]
+        joined = "".join(frames)
+        assert "response.completed" in joined or "response.output_item.added" in joined
+    finally:
+        await provider.cleanup()
+        await client.aclose()
+

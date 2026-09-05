@@ -34,6 +34,28 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-opus": "claude-opus-4-6-thinking",
     # Other models
     "gpt-oss-120b-medium": "gpt-oss-120b-medium",
+    # Claude 3.7 / 3.5 / 3 aliases (Claude Code CLI and Codex)
+    "claude-3-7-sonnet": "claude-sonnet-4-6",
+    "claude-3-7-sonnet-latest": "claude-sonnet-4-6",
+    "claude-3-7-sonnet-20250219": "claude-sonnet-4-6",
+    "claude-3-5-sonnet": "claude-sonnet-4-6",
+    "claude-3-5-sonnet-latest": "claude-sonnet-4-6",
+    "claude-3-5-sonnet-20241022": "claude-sonnet-4-6",
+    "claude-3-5-sonnet-20240620": "claude-sonnet-4-6",
+    "claude-3-opus": "claude-opus-4-6-thinking",
+    "claude-3-opus-latest": "claude-opus-4-6-thinking",
+    "claude-3-opus-20240229": "claude-opus-4-6-thinking",
+    "claude-3-5-haiku": "gemini-2.5-flash",
+    "claude-3-5-haiku-latest": "gemini-2.5-flash",
+    "claude-3-5-haiku-20241022": "gemini-2.5-flash",
+    "claude-3-haiku": "gemini-2.5-flash",
+    "claude-3-haiku-20240307": "gemini-2.5-flash",
+    # OpenAI model aliases (Codex)
+    "gpt-4o": "gemini-3.8-flash-tiered",
+    "gpt-4o-mini": "gemini-2.5-flash",
+    "o3-mini": "gemini-3.8-flash-tiered",
+    "o1": "claude-opus-4-6-thinking",
+    "o1-mini": "gemini-2.5-flash",
 }
 
 # Default known working Antigravity models (used if offline before discovery)
@@ -127,6 +149,14 @@ def resolve_backend_model(model_name: str) -> str:
     # Check explicit alias table
     if clean in MODEL_ALIASES:
         return MODEL_ALIASES[clean]
+
+    # Prefix matches for Claude models
+    if clean.startswith("claude-3-7-sonnet") or clean.startswith("claude-3-5-sonnet") or clean.startswith("claude-sonnet"):
+        return "claude-sonnet-4-6"
+    if clean.startswith("claude-3-opus") or clean.startswith("claude-opus"):
+        return "claude-opus-4-6-thinking"
+    if clean.startswith("claude-3-5-haiku") or clean.startswith("claude-3-haiku") or clean.startswith("claude-haiku"):
+        return "gemini-2.5-flash"
 
     # If user provided a name ending in clean alias (e.g. gemini-3.8-flash), check if -tiered exists
     tiered_candidate = f"{clean}-tiered"
