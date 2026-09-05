@@ -6,6 +6,7 @@ from free_claude_code.core.anthropic.models import (
 )
 from free_claude_code.providers.antigravity.translator import (
     AntigravityStreamTranslator,
+    _sanitize_schema,
     translate_messages_request,
 )
 from tests.providers.request_factory import make_messages_request
@@ -162,3 +163,57 @@ def test_stream_translator_captures_thought_signature():
     assert "tool_use" in raw_joined
     assert "run_bash" in raw_joined
     assert '"stop_reason": "tool_use"' in raw_joined
+
+
+def test_sanitize_schema_strips_unsupported_fields():
+    schema = {
+        "$schema": "http://json-schema.org/draft-07/schema#",
+        "title": "ToolInput",
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "search query",
+                "default": "none",
+            },
+            "options": {
+                "type": "object",
+                "propertyNames": {"pattern": "^[a-z]+$"},
+                "patternProperties": {"^[a-z]+$": {"type": "string"}},
+                "additionalProperties": False,
+            },
+            "tags": {
+                "type": "array",
+                "items": {"type": "string"},
+            },
+        },
+        "required": ["query", "non_existent_field"],
+        "additionalProperties": False,
+    }
+
+    sanitized = _sanitize_schema(schema)
+    assert sanitized["type"] == "OBJECT"
+    assert "$schema" not in sanitized
+    assert "title" not in sanitized
+    assert "additionalProperties" not in sanitized
+    assert "required" in sanitized
+    assert sanitized["required"] == ["query"]  # non_existent_field stripped
+    assert "propertyNames" not in sanitized["properties"]["options"]
+    assert "patternProperties" not in sanitized["properties"]["options"]
+    assert sanitized["properties"]["options"]["type"] == "OBJECT"
+    assert sanitized["properties"]["tags"]["type"] == "ARRAY"
+    assert sanitized["properties"]["tags"]["items"]["type"] == "STRING"
+
+
+def test_sanitize_schema_handles_anyof_nullable():
+    schema = {
+        "anyOf": [
+            {"type": "string"},
+            {"type": "null"},
+        ],
+        "description": "Optional string value",
+    }
+    sanitized = _sanitize_schema(schema)
+    assert sanitized["type"] == "STRING"
+    assert sanitized["nullable"] is True
+    assert sanitized["description"] == "Optional string value"

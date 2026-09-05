@@ -333,13 +333,31 @@ async def test_codex_stream_responses_sanitization(provider_config):
             tools=[
                 {"type": "web_search"},
                 {
+                    "type": "namespace",
+                    "name": "agent",
+                    "description": "Agent namespace tool",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "spawn_agent",
+                            "description": "Spawn agent",
+                            "parameters": {"type": "object", "properties": {}},
+                        }
+                    ],
+                },
+                {
                     "type": "function",
                     "name": "bash",
                     "description": "Run bash command",
                     "parameters": {
                         "$schema": "http://json-schema.org/draft-07/schema#",
                         "type": "object",
-                        "properties": {"cmd": {"type": "string"}},
+                        "properties": {
+                            "cmd": {
+                                "type": "string",
+                                "propertyNames": {"pattern": "^[a-z]+$"},
+                            }
+                        },
                         "additionalProperties": False,
                     },
                 },
@@ -349,6 +367,8 @@ async def test_codex_stream_responses_sanitization(provider_config):
             reasoning={"effort": "medium", "summary": "none"},
             truncation="auto",
             text={"verbosity": "low"},
+            prompt_cache_key="01a071c0-69b8-7b43-b113-54fa6554812d",
+            client_metadata={"session_id": "test-session-123"},
         )
 
         # Preflight should succeed

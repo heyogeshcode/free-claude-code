@@ -81,13 +81,14 @@ def log_unexpected_api_exception(
         return
     if request_id is not None:
         logger.error(
-            "{} request_id={} exc_type={}",
+            "{} request_id={} exc_type={}: {}",
             context,
             request_id,
             type(exc).__name__,
+            safe_exception_message(exc),
         )
     else:
-        logger.error("{} exc_type={}", context, type(exc).__name__)
+        logger.error("{} exc_type={}: {}", context, type(exc).__name__, safe_exception_message(exc))
 
 
 def unexpected_http_exception(

@@ -377,16 +377,39 @@ class AntigravityProvider(BaseProvider):
             await self._client.aclose()
 
 
+_ALLOWED_REQUEST_FIELDS = {
+    "model",
+    "input",
+    "instructions",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "stream",
+    "temperature",
+    "top_p",
+    "max_output_tokens",
+    "metadata",
+    "reasoning",
+    "previous_response_id",
+    "store",
+    "text",
+    "include",
+    "truncation",
+}
+
+
 def _sanitize_responses_request(
     request: OpenAIResponsesRequest,
 ) -> OpenAIResponsesRequest:
     """Sanitize OpenAI Responses request so it strictly satisfies Messages translation requirements.
 
     Codex and other clients pass fields like truncation='auto', reasoning.summary='none',
-    text.verbosity, and non-function tool definitions (e.g. web_search) which are rejected by
-    strict Messages wire shape converters.
+    text.verbosity, prompt_cache_key, client_metadata, and non-function tool definitions
+    (e.g. web_search) which are rejected by strict Messages wire shape converters.
     """
-    data = request.model_dump(mode="json", exclude_none=True)
+    raw_data = request.model_dump(mode="json", exclude_none=True)
+    # Strip unknown root-level fields like prompt_cache_key, client_metadata
+    data = {k: v for k, v in raw_data.items() if k in _ALLOWED_REQUEST_FIELDS}
 
     # 1. Truncation: only None or 'disabled' allowed
     data.pop("truncation", None)
@@ -427,17 +450,26 @@ def _sanitize_responses_request(
         else:
             data.pop("text", None)
 
-    # 5. Tools: only keep function and custom tools
+    # 5. Tools: only keep function, custom, and namespace tools
     valid_tool_names: set[str] = set()
     if "tools" in data:
         tools_val = data["tools"]
         if isinstance(tools_val, list):
             clean_tools: list[dict[str, Any]] = []
             for t in tools_val:
-                if isinstance(t, dict) and t.get("type") in ("function", "custom"):
+                if isinstance(t, dict) and t.get("type") in ("function", "custom", "namespace"):
                     clean_tools.append(t)
                     if "name" in t and isinstance(t["name"], str):
                         valid_tool_names.add(t["name"])
+                    if t.get("type") == "namespace" and isinstance(t.get("tools"), list):
+                        ns_name = t.get("name", "")
+                        for sub_t in t["tools"]:
+                            if isinstance(sub_t, dict) and "name" in sub_t and isinstance(sub_t["name"], str):
+                                sub_name = sub_t["name"]
+                                valid_tool_names.add(sub_name)
+                                if ns_name:
+                                    valid_tool_names.add(f"{ns_name}.{sub_name}")
+                                    valid_tool_names.add(f"{ns_name}__{sub_name}")
             if clean_tools:
                 data["tools"] = clean_tools
             else:

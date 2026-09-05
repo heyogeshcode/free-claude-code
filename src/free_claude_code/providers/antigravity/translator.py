@@ -99,33 +99,124 @@ def _extract_system_text(system: Any) -> str:
     return ""
 
 
+# Allowed fields in Google Gemini / Cloud Code Schema protobuf
+_GEMINI_ALLOWED_SCHEMA_FIELDS = {
+    "type",
+    "format",
+    "description",
+    "nullable",
+    "enum",
+    "maxItems",
+    "minItems",
+    "properties",
+    "required",
+    "items",
+}
+
+
 def _sanitize_schema(schema: Any) -> dict[str, Any]:
+    """Sanitize JSON schema to strictly conform to Google Gemini Schema protobuf.
+
+    Strips unsupported fields such as $schema, additionalProperties, title, $defs,
+    definitions, propertyNames, patternProperties, default, etc., and normalizes types.
+    """
     if not isinstance(schema, dict):
         return {"type": "OBJECT", "properties": {}}
 
-    result = dict(schema)
-    # Strip keywords unsupported by Google Gemini schema validator
-    for forbidden in ("$schema", "additionalProperties", "title", "$defs", "definitions"):
-        result.pop(forbidden, None)
+    raw = dict(schema)
+    result: dict[str, Any] = {}
 
-    # Ensure type is uppercase or valid JSON schema
-    schema_type = result.get("type")
+    # Simplify anyOf / oneOf / allOf if type is not directly present
+    nullable = bool(raw.get("nullable", False))
+    for combiner in ("anyOf", "oneOf", "allOf"):
+        if combiner in raw and isinstance(raw[combiner], list):
+            for variant in raw[combiner]:
+                if isinstance(variant, dict):
+                    vtype = variant.get("type")
+                    if vtype == "null" or (isinstance(vtype, list) and "null" in vtype):
+                        nullable = True
+                    elif "type" not in raw and vtype:
+                        raw["type"] = vtype
+                        if "properties" in variant and "properties" not in raw:
+                            raw["properties"] = variant["properties"]
+                        if "items" in variant and "items" not in raw:
+                            raw["items"] = variant["items"]
+                        if "enum" in variant and "enum" not in raw:
+                            raw["enum"] = variant["enum"]
+                        if "description" in variant and "description" not in raw:
+                            raw["description"] = variant["description"]
+
+    # Normalize type
+    schema_type = raw.get("type")
+    if isinstance(schema_type, list):
+        if "null" in schema_type:
+            nullable = True
+            schema_type = [t for t in schema_type if t != "null"]
+        schema_type = schema_type[0] if schema_type else None
+
     if isinstance(schema_type, str):
-        result["type"] = (
-            schema_type.upper()
-            if schema_type.lower()
-            in ("object", "string", "number", "integer", "boolean", "array")
-            else schema_type
-        )
+        st_upper = schema_type.upper()
+        if st_upper in ("OBJECT", "STRING", "NUMBER", "INTEGER", "BOOLEAN", "ARRAY"):
+            result["type"] = st_upper
+        else:
+            result["type"] = "STRING"
+    elif "properties" in raw:
+        result["type"] = "OBJECT"
+    elif "items" in raw:
+        result["type"] = "ARRAY"
+    elif "enum" in raw:
+        result["type"] = "STRING"
+    else:
+        result["type"] = "OBJECT"
 
-    if "properties" in result and isinstance(result["properties"], dict):
+    if nullable:
+        result["nullable"] = True
+
+    if "description" in raw and raw["description"] is not None:
+        result["description"] = str(raw["description"])
+
+    if "format" in raw and isinstance(raw["format"], str):
+        result["format"] = raw["format"]
+
+    if "enum" in raw and isinstance(raw["enum"], list):
+        result["enum"] = [str(x) for x in raw["enum"]]
+
+    if "maxItems" in raw and isinstance(raw["maxItems"], int):
+        result["maxItems"] = raw["maxItems"]
+
+    if "minItems" in raw and isinstance(raw["minItems"], int):
+        result["minItems"] = raw["minItems"]
+
+    # Properties
+    if "properties" in raw and isinstance(raw["properties"], dict):
         sanitized_props: dict[str, Any] = {}
-        for prop_name, prop_def in result["properties"].items():
-            sanitized_props[prop_name] = _sanitize_schema(prop_def)
+        for prop_name, prop_def in raw["properties"].items():
+            if isinstance(prop_name, str):
+                sanitized_props[prop_name] = _sanitize_schema(prop_def)
         result["properties"] = sanitized_props
 
-    if "items" in result and isinstance(result["items"], dict):
-        result["items"] = _sanitize_schema(result["items"])
+    # Required: Gemini requires all listed required fields to be declared in properties
+    if "required" in raw and isinstance(raw["required"], list):
+        props = result.get("properties")
+        if isinstance(props, dict):
+            reqs = [
+                str(k)
+                for k in raw["required"]
+                if isinstance(k, str) and k in props
+            ]
+        else:
+            reqs = [str(k) for k in raw["required"] if isinstance(k, str)]
+        if reqs:
+            result["required"] = reqs
+
+    # Items for ARRAY schemas
+    if "items" in raw:
+        if isinstance(raw["items"], dict):
+            result["items"] = _sanitize_schema(raw["items"])
+        elif isinstance(raw["items"], list) and raw["items"]:
+            result["items"] = _sanitize_schema(raw["items"][0])
+    elif result.get("type") == "ARRAY":
+        result["items"] = {"type": "STRING"}
 
     return result
 
