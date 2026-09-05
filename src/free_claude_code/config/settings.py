@@ -368,6 +368,9 @@ class Settings(BaseModel):
     openai_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="OPENAI_PROXY"
     )
+    antigravity_proxy: OptionalNonEmptyString = Field(
+        default=None, validation_alias="ANTIGRAVITY_PROXY"
+    )
     xai_proxy: OptionalNonEmptyString = Field(
         default=None, validation_alias="XAI_PROXY"
     )

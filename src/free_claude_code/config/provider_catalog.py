@@ -173,6 +173,13 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         auth_kind=ProviderAuthKind.CONNECTED_ACCOUNT,
         default_base_url="https://api.githubcopilot.com",
     ),
+    "antigravity": ProviderDescriptor(
+        provider_id="antigravity",
+        display_name="Google Antigravity",
+        auth_kind=ProviderAuthKind.CONNECTED_ACCOUNT,
+        default_base_url="https://daily-cloudcode-pa.googleapis.com",
+        proxy_attr="antigravity_proxy",
+    ),
     "xai": ProviderDescriptor(
         provider_id="xai",
         display_name="xAI (Grok)",

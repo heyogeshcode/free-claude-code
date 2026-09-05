@@ -10,7 +10,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=for-the-badge)](https://opensource.org/licenses/MIT)
 [![Python 3.14](https://img.shields.io/badge/python-3.14-3776ab.svg?style=for-the-badge&logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![uv](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/uv/main/assets/badge/v0.json&style=for-the-badge)](https://github.com/astral-sh/uv)
-[![Testing: Pytest](https://img.shields.io/badge/Testing-Pytest-00c0ff.svg?style=for-the-badge)](https://github.com/Alishahryar1/free-claude-code/actions/workflows/tests.yml)
+[![Testing: Pytest](https://img.shields.io/badge/Testing-Pytest-00c0ff.svg?style=for-the-badge)](https://github.com/heyogeshcode/free-claude-code/actions/workflows/tests.yml)
 [![Type checking: Ty](https://img.shields.io/badge/type%20checking-ty-ffcc00.svg?style=for-the-badge)](https://pypi.org/project/ty/)
 [![Code style: Ruff](https://img.shields.io/badge/code%20formatting-ruff-f5a623.svg?style=for-the-badge)](https://github.com/astral-sh/ruff)
 [![Logging: Loguru](https://img.shields.io/badge/logging-loguru-4ecdc4.svg?style=for-the-badge)](https://github.com/Delgan/loguru)
@@ -50,13 +50,13 @@ Free-tier availability and limits are controlled by each provider and may change
 macOS/Linux:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.sh" | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1")))
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.ps1")))
 ```
 
 Re-run the same command to update. When prompted, choose at least one coding agent and optionally RTK. You can review the installers before running them: [install.sh](scripts/install.sh) and [install.ps1](scripts/install.ps1).
@@ -198,6 +198,7 @@ GitHub Copilot is a separate service; connect it through **Connected accounts** 
 | [ClinePass](https://docs.cline.bot/getting-started/clinepass) | `CLINE_API_KEY` | `cline_pass/cline-pass/kimi-k3` |
 | [OpenAI / ChatGPT](https://learn.chatgpt.com/docs/auth) | Connect ChatGPT in the Admin UI | `openai/<model-id>` |
 | [GitHub Copilot](https://docs.github.com/en/copilot/how-tos/copilot-sdk/auth/authenticate) | Connect GitHub Copilot in the Admin UI | `github_copilot/<model-id>` |
+| [Google Antigravity](https://antigravity.google/) | Connect Google Antigravity in the Admin UI | `antigravity/<model-id>` |
 | [xAI (Grok)](https://console.x.ai/team/default/api-keys) | `XAI_API_KEY` | `xai/grok-4.5` |
 | [QwenCloud Token Plan](https://home.qwencloud.com/api-keys) | `QWENCLOUD_API_KEY` | `qwencloud/qwen3.7-plus` |
 | [QwenCloud Coding Plan](https://home.qwencloud.com/api-keys) | `QWENCLOUD_CODING_API_KEY` | `qwencloud_coding/qwen3.7-plus` |
@@ -260,6 +261,7 @@ GitHub Copilot is a separate service; connect it through **Connected accounts** 
   depend on your subscription and organization policies. Restart an already-running
   agent after connecting. Disconnect stops FCC use and leaves the native login intact.
   FCC pins its SDK and CLI compatibility because direct endpoint access is experimental.
+- Google Antigravity connects via official Google OAuth with authentic Antigravity branding. Connect from **Providers → Connected accounts → Google Antigravity → Connect** in the Admin UI. Access models such as `antigravity/gemini-3.8-flash`, `antigravity/gemini-3.7-flash`, `antigravity/claude-sonnet-4-6`, and `antigravity/claude-opus-4-6-thinking`. Live model discovery automatically keeps models updated.
 - Azure OpenAI uses the deployment names from your resource. Set
   `AZURE_OPENAI_BASE_URL` to its complete v1 endpoint, such as
   `https://YOUR-RESOURCE-NAME.openai.azure.com/openai/v1/`, and select a
@@ -538,25 +540,25 @@ macOS/Linux:
 NVIDIA NIM transcription:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-nim
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-nim
 ```
 
 Local Whisper on CPU or CUDA:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-local
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-local
 ```
 
 Both backends:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-all
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-all
 ```
 
 Local Whisper with CUDA 13.0:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-local --torch-backend cu130
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.sh" | sh -s -- --voice-local --torch-backend cu130
 ```
 
 Windows PowerShell:
@@ -564,25 +566,25 @@ Windows PowerShell:
 NVIDIA NIM transcription:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1"))) -VoiceNim
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.ps1"))) -VoiceNim
 ```
 
 Local Whisper on CPU or CUDA:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1"))) -VoiceLocal
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.ps1"))) -VoiceLocal
 ```
 
 Both backends:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1"))) -VoiceAll
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.ps1"))) -VoiceAll
 ```
 
 Local Whisper with CUDA 13.0:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install.ps1"))) -VoiceLocal -TorchBackend cu130
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install.ps1"))) -VoiceLocal -TorchBackend cu130
 ```
 
 Restart `fcc-server`. In **Admin UI → Messaging → Voice**, enable voice notes, select `cpu`, `cuda`, or `nvidia_nim`, and choose the Whisper model. Local gated models need `HUGGINGFACE_API_KEY`; NVIDIA NIM transcription needs `NVIDIA_NIM_API_KEY`.
@@ -602,13 +604,13 @@ Re-run the matching command from [Install Or Update](#install).
 Rerunning FCC's Windows installer with Muse Code selected installs or updates FCC's managed Muse executable. To install or update only Muse Code:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/install-muse.ps1")))
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/install-muse.ps1")))
 ```
 
 To remove only that managed Muse executable while preserving Muse data and other installations:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/uninstall-muse.ps1")))
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/uninstall-muse.ps1")))
 ```
 
 FCC's ordinary uninstaller below continues to leave Muse Code installed.
@@ -631,18 +633,18 @@ Stop every running FCC command before uninstalling.
 macOS/Linux:
 
 ```bash
-curl -fsSL "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/uninstall.sh" | sh
+curl -fsSL "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/uninstall.sh" | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/Alishahryar1/free-claude-code/main/scripts/uninstall.ps1")))
+& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/heyogeshcode/free-claude-code/main/scripts/uninstall.ps1")))
 ```
 
 ## Project Links
 
-- [Report bugs or request features](https://github.com/Alishahryar1/free-claude-code/issues)
+- [Report bugs or request features](https://github.com/heyogeshcode/free-claude-code/issues)
 - [Contributing guide](CONTRIBUTING.md)
 
 ## License

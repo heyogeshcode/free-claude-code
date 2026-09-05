@@ -29,7 +29,7 @@ _DISPLAY_NAME = "Muse Code"
 _INSTALL_HINT = (
     "Install Muse Code on native Windows with "
     '`& ([scriptblock]::Create((irm "https://raw.githubusercontent.com/'
-    'Alishahryar1/free-claude-code/main/scripts/install-muse.ps1")))`, '
+    'heyogeshcode/free-claude-code/main/scripts/install-muse.ps1")))`, '
     "or on macOS/Linux/WSL with "
     "`curl -fsSL https://dev.meta.ai/install.sh | bash`."
 )

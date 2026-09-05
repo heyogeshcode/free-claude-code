@@ -31,7 +31,7 @@ def test_admin_loads_current_release_assets_before_rendering_dynamic_content(
     logo_link = page.get_by_role("link", name="Open Free Claude Code on GitHub")
     expect(logo_link).to_be_visible()
     expect(logo_link).to_have_attribute(
-        "href", "https://github.com/Alishahryar1/free-claude-code"
+        "href", "https://github.com/heyogeshcode/free-claude-code"
     )
     expect(logo_link).to_have_attribute("target", "_blank")
 

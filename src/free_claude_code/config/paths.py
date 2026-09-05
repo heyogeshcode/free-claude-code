@@ -106,3 +106,19 @@ def openai_auth_lock_path() -> Path:
 def github_copilot_auth_path() -> Path:
     """Return FCC connection state; native Copilot retains credentials."""
     return config_dir_path() / AUTH_DIRNAME / "github_copilot.json"
+
+
+def antigravity_auth_path() -> Path:
+    """Return FCC Antigravity credential file path."""
+    return config_dir_path() / AUTH_DIRNAME / "antigravity.json"
+
+
+def antigravity_auth_lock_path() -> Path:
+    """Return the cross-process lock path for Antigravity credentials."""
+    return config_dir_path() / AUTH_DIRNAME / "antigravity.lock"
+
+
+def antigravity_cli_token_path() -> Path:
+    """Return the default path for native agy CLI credentials if present."""
+    return Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
+

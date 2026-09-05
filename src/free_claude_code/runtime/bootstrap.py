@@ -17,6 +17,10 @@ from free_claude_code.config.settings import Settings
 from free_claude_code.messaging.transcription import TranscriptionService
 from free_claude_code.messaging.voice import Transcriber
 from free_claude_code.providers.admission import ProviderAdmissionController
+from free_claude_code.providers.antigravity import (
+    AntigravityAuthManager,
+    AntigravityProvider,
+)
 from free_claude_code.providers.base import BaseProvider, ProviderConfig
 from free_claude_code.providers.github_copilot.auth import CopilotAuthManager
 from free_claude_code.providers.github_copilot.provider import GitHubCopilotProvider
@@ -48,13 +52,16 @@ def build_asgi_app(
     )
     openai_auth = OpenAIAuthManager(proxy=settings.openai_proxy)
     copilot_auth = CopilotAuthManager()
+    antigravity_auth = AntigravityAuthManager(proxy=settings.antigravity_proxy)
     copilot_factory = partial(_create_copilot_provider, auth=copilot_auth)
     openai_factory = partial(_create_openai_provider, auth=openai_auth)
+    antigravity_factory = partial(_create_antigravity_provider, auth=antigravity_auth)
     provider_constructor = partial(
         create_provider,
         injected_factories={
             "openai": openai_factory,
             "github_copilot": copilot_factory,
+            "antigravity": antigravity_factory,
         },
     )
     runtime_factory = partial(
@@ -67,6 +74,7 @@ def build_asgi_app(
         connected_provider_ids=lambda: (
             *openai_auth.connected_provider_ids(),
             *copilot_auth.connected_provider_ids(),
+            *antigravity_auth.connected_provider_ids(),
         ),
         model_catalog_publisher=CodexModelCatalogPublisher(),
     )
@@ -79,7 +87,11 @@ def build_asgi_app(
         chat_service=chat_service,
         transcriber=_create_transcriber(settings),
         restart_callback=restart_callback,
-        connected_accounts={"openai": openai_auth, "github_copilot": copilot_auth},
+        connected_accounts={
+            "openai": openai_auth,
+            "github_copilot": copilot_auth,
+            "antigravity": antigravity_auth,
+        },
     )
     services = ApiServices(
         requests=provider_manager,
@@ -108,6 +120,16 @@ def _create_copilot_provider(
     auth: CopilotAuthManager,
 ) -> BaseProvider:
     return GitHubCopilotProvider(config, auth=auth, admission=admission)
+
+
+def _create_antigravity_provider(
+    config: ProviderConfig,
+    _settings: Settings,
+    admission: ProviderAdmissionController,
+    *,
+    auth: AntigravityAuthManager,
+) -> BaseProvider:
+    return AntigravityProvider(config, auth=auth, admission=admission)
 
 
 def _create_transcriber(settings: Settings) -> Transcriber | None:
