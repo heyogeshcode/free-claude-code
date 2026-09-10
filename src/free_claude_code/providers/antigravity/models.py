@@ -146,6 +146,10 @@ def resolve_backend_model(model_name: str) -> str:
     if clean.startswith("antigravity/"):
         clean = clean[len("antigravity/") :]
 
+    if clean.startswith("claude-google-"):
+        suffix = clean[len("claude-google-") :]
+        clean = suffix if suffix.startswith("gemini-") else f"gemini-{suffix}"
+
     # Check explicit alias table
     if clean in MODEL_ALIASES:
         return MODEL_ALIASES[clean]

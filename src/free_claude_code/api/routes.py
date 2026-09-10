@@ -109,6 +109,8 @@ def _probe_response(allow: str) -> Response:
 
 
 @router.post("/v1/messages")
+@router.post("/v1/v1/messages")
+@router.post("/messages")
 async def create_message(
     request: Request,
     request_data: MessagesRequest,
@@ -124,11 +126,15 @@ async def create_message(
 
 
 @router.api_route("/v1/messages", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/v1/messages", methods=["HEAD", "OPTIONS"])
+@router.api_route("/messages", methods=["HEAD", "OPTIONS"])
 async def probe_messages(_auth=Depends(require_anthropic_proxy_auth)):
     return _probe_response("POST, HEAD, OPTIONS")
 
 
 @router.post("/v1/responses")
+@router.post("/v1/v1/responses")
+@router.post("/responses")
 async def create_response(
     request: Request,
     request_data: OpenAIResponsesRequest,
@@ -144,11 +150,15 @@ async def create_response(
 
 
 @router.api_route("/v1/responses", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/v1/responses", methods=["HEAD", "OPTIONS"])
+@router.api_route("/responses", methods=["HEAD", "OPTIONS"])
 async def probe_responses(_auth=Depends(require_proxy_auth)):
     return _probe_response("POST, HEAD, OPTIONS")
 
 
 @router.post("/v1/messages/count_tokens")
+@router.post("/v1/v1/messages/count_tokens")
+@router.post("/messages/count_tokens")
 async def count_tokens(
     request: Request,
     request_data: TokenCountRequest,
@@ -161,6 +171,8 @@ async def count_tokens(
 
 
 @router.api_route("/v1/messages/count_tokens", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/v1/messages/count_tokens", methods=["HEAD", "OPTIONS"])
+@router.api_route("/messages/count_tokens", methods=["HEAD", "OPTIONS"])
 async def probe_count_tokens(_auth=Depends(require_anthropic_proxy_auth)):
     return _probe_response("POST, HEAD, OPTIONS")
 
@@ -197,11 +209,21 @@ async def probe_health():
     response_model=ModelsListResponse,
     response_model_exclude_none=True,
 )
+@router.get(
+    "/v1/v1/models",
+    response_model=ModelsListResponse,
+    response_model_exclude_none=True,
+)
+@router.get(
+    "/models",
+    response_model=ModelsListResponse,
+    response_model_exclude_none=True,
+)
 async def list_models(
     view: ModelCatalogView = ModelCatalogView.CLAUDE,
     services: ApiServices = Depends(get_services),
     settings: Settings = Depends(get_settings),
-    _auth=Depends(require_proxy_auth),
+    _auth=Depends(require_anthropic_proxy_auth),
 ):
     """List the model ids this proxy advertises to compatible clients."""
     trace_event(stage="ingress", event="free_claude_code.api.models.list", source="api")

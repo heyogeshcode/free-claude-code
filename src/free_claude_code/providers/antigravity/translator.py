@@ -51,7 +51,9 @@ def translate_messages_request(
             req_payload["tools"] = [{"functionDeclarations": function_declarations}]
 
     # Contents (alternating user / model messages)
-    contents = _build_contents(request.messages, signature_cache)
+    contents = _build_contents(
+        request.messages, signature_cache, backend_model=backend_model
+    )
     if not contents:
         # Fallback empty turn
         contents = [{"role": "user", "parts": [{"text": ""}]}]
@@ -224,10 +226,12 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
 def _build_contents(
     messages: list[Any],
     signature_cache: dict[str, str],
+    backend_model: str = "",
 ) -> list[dict[str, Any]]:
-    raw_turns: list[dict[str, Any]] = []
+    is_gemini = backend_model.startswith("gemini")
+    valid_tool_call_ids: set[str] = set()
 
-    # First pass: look for any thinking signatures in assistant messages
+    # First pass: look for any thinking signatures and tool signatures in messages
     for msg in messages:
         content = getattr(msg, "content", None) or (
             msg.get("content") if isinstance(msg, dict) else None
@@ -237,11 +241,23 @@ def _build_contents(
                 btype = getattr(block, "type", None) or (
                     block.get("type") if isinstance(block, dict) else ""
                 )
+                tid = getattr(block, "id", None) or (
+                    block.get("id") if isinstance(block, dict) else ""
+                )
                 sig = getattr(block, "signature", None) or (
                     block.get("signature") if isinstance(block, dict) else ""
                 )
                 if btype == "thinking" and sig:
                     signature_cache["latest_turn_sig"] = sig
+                elif btype == "tool_use":
+                    if not sig and tid:
+                        sig = signature_cache.get(tid)
+                    if sig:
+                        valid_tool_call_ids.add(tid)
+                        if tid and tid not in signature_cache:
+                            signature_cache[tid] = sig
+
+    raw_turns: list[dict[str, Any]] = []
 
     for msg in messages:
         role = getattr(msg, "role", None) or (
@@ -304,22 +320,32 @@ def _build_contents(
                     if not isinstance(tool_input, dict):
                         tool_input = {}
 
-                    part: dict[str, Any] = {
-                        "functionCall": {
-                            "name": tool_name,
-                            "args": tool_input,
-                            "id": tool_id,
-                        }
-                    }
-                    # Retrieve cached thought signature if available
                     sig = (
-                        signature_cache.get(tool_id)
-                        or signature_cache.get(tool_name)
-                        or signature_cache.get("latest_turn_sig")
+                        getattr(block, "signature", None)
+                        or (block.get("signature") if isinstance(block, dict) else "")
+                        or signature_cache.get(tool_id)
                     )
-                    if sig:
-                        part["thoughtSignature"] = sig
-                    parts.append(part)
+
+                    # Gemini models strictly require thoughtSignature on functionCall parts.
+                    # Missing signatures cause 400 Bad Request, and mismatched signatures
+                    # cause 400 Corrupted thought signature. If no genuine signature is
+                    # available, fallback to a clean text representation.
+                    if is_gemini and not sig:
+                        inp_str = json.dumps(tool_input) if tool_input else "{}"
+                        parts.append(
+                            {"text": f"Calling tool `{tool_name}` with arguments: {inp_str}"}
+                        )
+                    else:
+                        part: dict[str, Any] = {
+                            "functionCall": {
+                                "name": tool_name,
+                                "args": tool_input,
+                                "id": tool_id,
+                            }
+                        }
+                        if sig:
+                            part["thoughtSignature"] = sig
+                        parts.append(part)
                 elif btype == "tool_result":
                     tool_use_id = getattr(block, "tool_use_id", None) or (
                         block.get("tool_use_id") if isinstance(block, dict) else ""
@@ -339,18 +365,27 @@ def _build_contents(
                     else:
                         result_str = str(result_content)
 
-                    # Wrap in functionResponse
-                    part = {
-                        "functionResponse": {
-                            "name": _find_tool_name_by_id(
-                                messages, tool_use_id, signature_cache
-                            )
-                            or "tool",
-                            "response": {"content": result_str},
-                            "id": tool_use_id,
+                    # For Gemini models, if the matching tool_use was converted to text,
+                    # the tool_result must also be text to avoid functionResponse without functionCall.
+                    if is_gemini and tool_use_id not in valid_tool_call_ids:
+                        tool_name = _find_tool_name_by_id(
+                            messages, tool_use_id, signature_cache
+                        ) or "tool"
+                        parts.append(
+                            {"text": f"[Tool `{tool_name}` result]:\n{result_str}"}
+                        )
+                    else:
+                        part = {
+                            "functionResponse": {
+                                "name": _find_tool_name_by_id(
+                                    messages, tool_use_id, signature_cache
+                                )
+                                or "tool",
+                                "response": {"content": result_str},
+                                "id": tool_use_id,
+                            }
                         }
-                    }
-                    parts.append(part)
+                        parts.append(part)
 
         if parts:
             raw_turns.append({"role": gemini_role, "parts": parts})
@@ -362,6 +397,13 @@ def _build_contents(
             merged[-1]["parts"].extend(turn["parts"])
         else:
             merged.append(turn)
+
+    # Gemini requires first turn to be 'user' and last turn to be 'user'
+    if is_gemini and merged:
+        if merged[0]["role"] != "user":
+            merged.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
+        if merged[-1]["role"] == "model":
+            merged.append({"role": "user", "parts": [{"text": "Please continue."}]})
 
     return merged
 
@@ -411,6 +453,7 @@ class AntigravityStreamTranslator:
         self._current_block_type: str | None = None
         self._total_output_tokens = 0
         self._stop_reason = "end_turn"
+        self._pending_sig: str | None = None
 
     def process_line(self, line: str) -> list[str]:
         """Process one SSE line and return zero or more Anthropic SSE event frames."""
@@ -478,6 +521,7 @@ class AntigravityStreamTranslator:
                 sig = part.get("thoughtSignature")
                 if sig and isinstance(sig, str):
                     self.signature_cache["latest_turn_sig"] = sig
+                    self._pending_sig = sig
 
                 # Text delta
                 text = part.get("text")
@@ -527,11 +571,17 @@ class AntigravityStreamTranslator:
                         function_call.get("id") or f"toolu_{uuid.uuid4().hex[:20]}"
                     )
 
-                    # If this part also has thoughtSignature, record it for this tool call ID
+                    effective_sig = (
+                        (part.get("thoughtSignature") if isinstance(part.get("thoughtSignature"), str) else None)
+                        or sig
+                        or self._pending_sig
+                    )
+
+                    # If this part or stream has thoughtSignature, record it for this tool call ID
                     self.signature_cache[f"name_{call_id}"] = fn_name
-                    if sig:
-                        self.signature_cache[call_id] = sig
-                        self.signature_cache[fn_name] = sig
+                    if effective_sig:
+                        self.signature_cache[call_id] = effective_sig
+                        self.signature_cache[fn_name] = effective_sig
 
                     if self._current_block_type is not None:
                         events.append(

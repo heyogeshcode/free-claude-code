@@ -1,6 +1,7 @@
 """Antigravity provider implementation using Google Cloud Code / Antigravity API."""
 
 import asyncio
+import json
 import sys
 from collections.abc import AsyncIterator
 from typing import Any, cast
@@ -10,6 +11,7 @@ from loguru import logger
 
 from free_claude_code.application.errors import InvalidRequestError
 from free_claude_code.application.model_metadata import ProviderModelInfo
+from free_claude_code.config.paths import antigravity_signatures_path
 from free_claude_code.core.anthropic.models import MessagesRequest
 from free_claude_code.core.anthropic.native import NativeMessagesOptions
 from free_claude_code.core.anthropic.streaming.decoder import AnthropicSSEDecoder
@@ -53,7 +55,8 @@ class AntigravityProvider(BaseProvider):
         super().__init__(config)
         self._auth = auth
         self._admission = admission
-        self._signature_cache: dict[str, str] = {}
+        self._signatures_path = antigravity_signatures_path()
+        self._signature_cache: dict[str, str] = self._load_signature_cache()
         self._client = client or httpx.AsyncClient(
             proxy=config.proxy,
             timeout=httpx.Timeout(
@@ -64,6 +67,31 @@ class AntigravityProvider(BaseProvider):
         )
         self._owns_client = client is None
         self._closing = False
+
+    def _load_signature_cache(self) -> dict[str, str]:
+        if not self._signatures_path.exists():
+            return {}
+        try:
+            with open(self._signatures_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return {str(k): str(v) for k, v in data.items()}
+        except Exception as exc:
+            logger.debug("Failed to load Antigravity signature cache: {}", exc)
+        return {}
+
+    def _save_signature_cache(self) -> None:
+        try:
+            self._signatures_path.parent.mkdir(parents=True, exist_ok=True)
+            if len(self._signature_cache) > 2000:
+                items = list(self._signature_cache.items())[-2000:]
+                self._signature_cache = dict(items)
+            temp_path = self._signatures_path.with_suffix(".tmp")
+            with open(temp_path, "w", encoding="utf-8") as f:
+                json.dump(self._signature_cache, f)
+            temp_path.replace(self._signatures_path)
+        except Exception as exc:
+            logger.debug("Failed to save Antigravity signature cache: {}", exc)
 
     def preflight_messages(
         self,
@@ -298,6 +326,7 @@ class AntigravityProvider(BaseProvider):
                         await attempt.accept()
                     yield ev
 
+                self._save_signature_cache()
                 return
 
             except (asyncio.CancelledError, GeneratorExit):
@@ -313,6 +342,7 @@ class AntigravityProvider(BaseProvider):
                         False,
                     ) from exc
             finally:
+                self._save_signature_cache()
                 if scope is not None:
                     await scope.aclose(active_error=sys.exception())
 

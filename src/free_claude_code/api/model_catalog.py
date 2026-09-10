@@ -83,6 +83,9 @@ class ModelResponse(BaseModel):
     inference_idle_timeout_seconds: int | None = Field(
         default=None, serialization_alias="inferenceIdleTimeoutSecs"
     )
+    anthropic_family_tier: str | None = Field(
+        default=None, serialization_alias="anthropic_family_tier"
+    )
     metadata: MuseMetadataEnvelope | None = None
 
 
@@ -99,41 +102,85 @@ SUPPORTED_CLAUDE_MODELS = [
         id="claude-fable-5",
         display_name="Claude Fable 5",
         created_at="2026-06-09T00:00:00Z",
+        anthropic_family_tier="fable",
     ),
     ModelResponse(
         id="claude-opus-4-20250514",
         display_name="Claude Opus 4",
         created_at="2025-05-14T00:00:00Z",
+        anthropic_family_tier="opus",
     ),
     ModelResponse(
         id="claude-sonnet-4-20250514",
         display_name="Claude Sonnet 4",
         created_at="2025-05-14T00:00:00Z",
+        anthropic_family_tier="sonnet",
     ),
     ModelResponse(
         id="claude-haiku-4-20250514",
         display_name="Claude Haiku 4",
         created_at="2025-05-14T00:00:00Z",
+        anthropic_family_tier="haiku",
     ),
     ModelResponse(
         id="claude-3-opus-20240229",
         display_name="Claude 3 Opus",
         created_at="2024-02-29T00:00:00Z",
+        anthropic_family_tier="opus",
     ),
     ModelResponse(
         id="claude-3-5-sonnet-20241022",
         display_name="Claude 3.5 Sonnet",
         created_at="2024-10-22T00:00:00Z",
+        anthropic_family_tier="sonnet",
     ),
     ModelResponse(
         id="claude-3-haiku-20240307",
         display_name="Claude 3 Haiku",
         created_at="2024-03-07T00:00:00Z",
+        anthropic_family_tier="haiku",
     ),
     ModelResponse(
         id="claude-3-5-haiku-20241022",
         display_name="Claude 3.5 Haiku",
         created_at="2024-10-22T00:00:00Z",
+        anthropic_family_tier="haiku",
+    ),
+    ModelResponse(
+        id="claude-google-3.8-flash",
+        display_name="Google Gemini 3.8 Flash",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="haiku",
+    ),
+    ModelResponse(
+        id="claude-google-3.7-flash",
+        display_name="Google Gemini 3.7 Flash",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="haiku",
+    ),
+    ModelResponse(
+        id="claude-google-3.1-pro",
+        display_name="Google Gemini 3.1 Pro",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="sonnet",
+    ),
+    ModelResponse(
+        id="claude-google-2.5-pro",
+        display_name="Google Gemini 2.5 Pro",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="sonnet",
+    ),
+    ModelResponse(
+        id="claude-google-pro-agent",
+        display_name="Google Gemini Pro Agent",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="opus",
+    ),
+    ModelResponse(
+        id="claude-google-3-flash",
+        display_name="Google Gemini 3.0 Flash",
+        created_at="2026-01-01T00:00:00Z",
+        anthropic_family_tier="haiku",
     ),
 ]
 
@@ -258,6 +305,11 @@ def _build_direct_models_response(
                     "responses" if view is ModelCatalogView.RESPONSES else None
                 ),
                 max_retries=0 if view is ModelCatalogView.RESPONSES else None,
+                anthropic_family_tier=(
+                    _infer_family_tier(provider_model_ref)
+                    if view is not ModelCatalogView.RESPONSES
+                    else None
+                ),
                 supports_reasoning=inventory_model.supports_thinking,
                 input_modalities=_serialize_input_modalities(
                     inventory_model.input_modalities
@@ -342,11 +394,28 @@ def _responses_inference_idle_timeout_seconds(provider_progress_timeout: float) 
     return math.ceil(provider_progress_timeout) + _INFERENCE_IDLE_TIMEOUT_MARGIN_SECONDS
 
 
-def _discovered_model_response(model_id: str, *, display_name: str) -> ModelResponse:
+def _infer_family_tier(model_id_or_ref: str) -> str:
+    normalized = model_id_or_ref.lower()
+    if "opus" in normalized:
+        return "opus"
+    if "haiku" in normalized or "flash" in normalized:
+        return "haiku"
+    if "fable" in normalized:
+        return "fable"
+    if "mythos" in normalized:
+        return "mythos"
+    return "sonnet"
+
+
+def _discovered_model_response(
+    model_id: str, *, display_name: str, family_tier: str | None = None
+) -> ModelResponse:
+    tier = family_tier or _infer_family_tier(display_name)
     return ModelResponse(
         id=model_id,
         display_name=display_name,
         created_at=DISCOVERED_MODEL_CREATED_AT,
+        anthropic_family_tier=tier,
     )
 
 

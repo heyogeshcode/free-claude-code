@@ -122,3 +122,8 @@ def antigravity_cli_token_path() -> Path:
     """Return the default path for native agy CLI credentials if present."""
     return Path.home() / ".gemini" / "antigravity-cli" / "antigravity-oauth-token"
 
+
+def antigravity_signatures_path() -> Path:
+    """Return the path to the cached Antigravity thought signatures."""
+    return config_dir_path() / AUTH_DIRNAME / "antigravity_signatures.json"
+

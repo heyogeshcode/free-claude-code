@@ -217,3 +217,71 @@ def test_sanitize_schema_handles_anyof_nullable():
     assert sanitized["type"] == "STRING"
     assert sanitized["nullable"] is True
     assert sanitized["description"] == "Optional string value"
+
+
+def test_gemini_tool_use_without_signature_falls_back_to_text():
+    tool = Tool(
+        name="bash",
+        description="Run bash command",
+        input_schema={"type": "object", "properties": {"command": {"type": "string"}}},
+    )
+    request = MessagesRequest(
+        model="antigravity/gemini-3.8-flash",
+        messages=[
+            {"role": "user", "content": "List files"},
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "call_unsig_1",
+                        "name": "bash",
+                        "input": {"command": "ls"},
+                    }
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "call_unsig_1",
+                        "content": "file1.txt\nfile2.txt",
+                    }
+                ],
+            },
+        ],
+        tools=[tool],
+        max_tokens=1000,
+    )
+    cache: dict[str, str] = {}
+    payload, backend_model = translate_messages_request(request, "test-project", cache)
+
+    assert backend_model == "gemini-3.8-flash-tiered"
+    contents = payload["request"]["contents"]
+    # Model turn should NOT contain raw functionCall without thoughtSignature
+    model_turn = next(c for c in contents if c["role"] == "model")
+    assert "functionCall" not in model_turn["parts"][0]
+    assert "Calling tool `bash`" in model_turn["parts"][0]["text"]
+
+    # User turn following it should NOT contain raw functionResponse
+    user_turn = contents[-1]
+    assert user_turn["role"] == "user"
+    assert "functionResponse" not in user_turn["parts"][-1]
+    assert "file1.txt" in user_turn["parts"][-1]["text"]
+
+
+def test_gemini_contents_boundary_constraints():
+    # If messages start with assistant, user turn is prepended
+    request = MessagesRequest(
+        model="antigravity/gemini-3.8-flash",
+        messages=[
+            {"role": "assistant", "content": "I am ready."},
+        ],
+        max_tokens=1000,
+    )
+    cache: dict[str, str] = {}
+    payload, _ = translate_messages_request(request, "test-project", cache)
+    contents = payload["request"]["contents"]
+    assert contents[0]["role"] == "user"
+    assert contents[-1]["role"] == "user"  # continuation appended if ended with model

@@ -173,6 +173,12 @@ class ModelRouter:
 
         provider_id, separator, provider_model = model_name.partition("/")
         if not separator:
+            if model_name.startswith("claude-google-"):
+                suffix = model_name[len("claude-google-") :]
+                gemini_model = (
+                    suffix if suffix.startswith("gemini-") else f"gemini-{suffix}"
+                )
+                return "antigravity", gemini_model, False
             return None, None, False
         if provider_id not in SUPPORTED_PROVIDER_IDS:
             return None, None, False
