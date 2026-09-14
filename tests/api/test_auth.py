@@ -121,7 +121,7 @@ def test_x_api_key_remains_rejected_on_non_messages_routes():
 
     for method, path in (
         (client.head, "/v1/responses"),
-        (client.get, "/v1/models"),
+        (client.get, "/muse-code/models"),
         (client.get, "/"),
     ):
         response = method(path, headers={"X-API-Key": "route-token"})

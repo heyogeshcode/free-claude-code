@@ -1,6 +1,7 @@
 """Provider execution shared by inbound API adapters."""
 
 import asyncio
+import contextlib
 import inspect
 import math
 import sys
@@ -9,6 +10,11 @@ from typing import Literal
 
 from loguru import logger
 
+from free_claude_code.application.account_store import (
+    current_account_id,
+    get_account_store,
+)
+from free_claude_code.application.ports import ProviderResolver
 from free_claude_code.core.anthropic import (
     Message,
     SystemContent,
@@ -28,7 +34,6 @@ from free_claude_code.core.trace import (
     traced_async_stream,
 )
 
-from .ports import ProviderResolver
 from .routing import (
     ProviderModelTarget,
     ResolvedModelRoute,
@@ -172,6 +177,7 @@ class ProviderExecutor:
         primary_provider = self._provider_resolver(primary.provider_id)
         primary_request = routed.request.model_copy(deep=True)
         primary_failure: ExecutionFailure | None = None
+        token = current_account_id.set(primary.account_id)
         try:
             primary_provider.preflight_messages(
                 primary_request,
@@ -179,6 +185,9 @@ class ProviderExecutor:
             )
         except ExecutionFailure as failure:
             primary_failure = failure
+        finally:
+            with contextlib.suppress(ValueError):
+                current_account_id.reset(token)
         input_tokens = self._token_counter(
             routed.request.messages,
             routed.request.system,
@@ -242,6 +251,7 @@ class ProviderExecutor:
         primary_provider = self._provider_resolver(primary.provider_id)
         primary_request = routed.request.model_copy(deep=True)
         primary_failure: ExecutionFailure | None = None
+        token = current_account_id.set(primary.account_id)
         try:
             primary_provider.preflight_responses(
                 primary_request,
@@ -249,6 +259,9 @@ class ProviderExecutor:
             )
         except ExecutionFailure as failure:
             primary_failure = failure
+        finally:
+            with contextlib.suppress(ValueError):
+                current_account_id.reset(token)
         input_tokens = self._responses_token_counter(routed.request)
 
         def open_candidate(
@@ -375,6 +388,7 @@ class ProviderExecutor:
                 provider_stream: AsyncIterator[str] | None = None
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
+                account_token = current_account_id.set(target.account_id)
                 try:
                     try:
                         provider_stream = open_candidate(index, target)
@@ -436,6 +450,8 @@ class ProviderExecutor:
                         yield chunk
                         progress_deadline = loop.time() + self._progress_timeout_seconds
                 finally:
+                    with contextlib.suppress(ValueError):
+                        current_account_id.reset(account_token)
                     if provider_stream is not None:
                         active_error = sys.exception()
                         preserved_error = active_error or candidate_failure
@@ -457,6 +473,28 @@ class ProviderExecutor:
                                 request_id=request_id,
                                 provider_id=target.provider_id,
                             ) from exc
+
+                if (
+                    candidate_failure is not None
+                    and target.account_id
+                    and (
+                        candidate_failure.kind == FailureKind.RATE_LIMIT
+                        or candidate_failure.status_code == 429
+                    )
+                ):
+                    store = get_account_store()
+                    if store is not None:
+                        store.set_model_cooldown(
+                            target.provider_id,
+                            target.account_id,
+                            target.provider_model,
+                            duration_seconds=60.0,
+                        )
+                        logger.warning(
+                            "Rate limit encountered on account={} model={}; cooldown set.",
+                            target.account_id,
+                            target.provider_model,
+                        )
 
                 if candidate_failure is None:
                     if not candidate_committed and candidate_selected is not None:

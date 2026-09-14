@@ -7,11 +7,13 @@ from free_claude_code.config.provider_catalog import (
 
 _EXPECTED_PROVIDER_ORDER: tuple[str, ...] = (
     "nvidia_nim",
+    "nvidia_fallback",
     "open_router",
     "groq",
     "cline_pass",
     "openai",
     "github_copilot",
+    "antigravity",
     "xai",
     "qwencloud",
     "qwencloud_coding",

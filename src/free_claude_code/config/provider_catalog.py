@@ -133,6 +133,14 @@ PROVIDER_CATALOG: dict[str, ProviderDescriptor] = {
         default_base_url=NVIDIA_NIM_DEFAULT_BASE,
         proxy_attr="nvidia_nim_proxy",
     ),
+    "nvidia_fallback": ProviderDescriptor(
+        provider_id="nvidia_fallback",
+        display_name="NVIDIA Fallback Pool",
+        credential_env="NVIDIA_FALLBACK_API_KEY",
+        credential_attr="nvidia_fallback_api_key",
+        default_base_url=NVIDIA_NIM_DEFAULT_BASE,
+        proxy_attr="nvidia_fallback_proxy",
+    ),
     "open_router": ProviderDescriptor(
         provider_id="open_router",
         display_name="OpenRouter",

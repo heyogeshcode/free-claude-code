@@ -311,7 +311,17 @@ class ApplicationRuntime:
             )
             self._connected_account_revisions[provider_id] = status.revision
         model_count = len(self.provider_manager.cached_model_ids().get(provider_id, ()))
-        return replace(status, model_count=model_count)
+        account_count = None
+        try:
+            from free_claude_code.application.account_store import get_account_store
+
+            store = get_account_store()
+            accounts = store.get_accounts(provider_id)
+            if accounts:
+                account_count = len(accounts)
+        except Exception:
+            pass
+        return replace(status, model_count=model_count, account_count=account_count)
 
     async def start_connected_account_login(
         self,

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 
 from loguru import logger
 
+from free_claude_code.application.account_store import AccountStore, get_account_store
 from free_claude_code.application.errors import UnknownProviderError
 from free_claude_code.config.model_refs import (
     is_retired_model_ref,
@@ -38,6 +39,7 @@ class ProviderModelTarget:
     provider_id: str
     provider_model: str
     provider_model_ref: str
+    account_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,8 +75,34 @@ class RoutedTokenCountRequest:
 class ModelRouter:
     """Resolve incoming Claude model names to configured provider/model pairs."""
 
-    def __init__(self, settings: Settings):
+    def __init__(
+        self,
+        settings: Settings,
+        account_store: AccountStore | None = None,
+    ):
         self._settings = settings
+        self._account_store = account_store or get_account_store()
+
+    def _expand_target_with_accounts(
+        self, target: ProviderModelTarget
+    ) -> list[ProviderModelTarget]:
+        """Expand target to all healthy accounts for this exact model (model-preserving)."""
+        if self._account_store is None:
+            return [target]
+        healthy_accounts = self._account_store.get_healthy_accounts_for_model(
+            target.provider_id, target.provider_model
+        )
+        if not healthy_accounts:
+            return [target]
+        return [
+            ProviderModelTarget(
+                provider_id=target.provider_id,
+                provider_model=target.provider_model,
+                provider_model_ref=target.provider_model_ref,
+                account_id=acc.id,
+            )
+            for acc in healthy_accounts
+        ]
 
     def resolve(self, claude_model_name: str) -> ResolvedModelRoute:
         (
@@ -95,27 +123,35 @@ class ModelRouter:
                 direct_provider_model,
                 reasoning_preference.value,
             )
-            primary = self._target(direct_provider_id, direct_provider_model)
-            return ResolvedModelRoute(
-                original_model=claude_model_name,
-                primary=primary,
-                fallbacks=self._fallback_targets(primary),
-                reasoning_preference=reasoning_preference,
-            )
+            raw_primary = self._target(direct_provider_id, direct_provider_model)
+        else:
+            provider_model_ref = self._resolve_model_ref(claude_model_name)
+            reasoning_preference = self._resolve_reasoning_preference(claude_model_name)
+            raw_primary = self._target_from_ref(provider_model_ref)
+            if raw_primary.provider_model != claude_model_name:
+                logger.debug(
+                    "MODEL MAPPING: '{}' -> '{}'",
+                    claude_model_name,
+                    raw_primary.provider_model,
+                )
 
-        provider_model_ref = self._resolve_model_ref(claude_model_name)
-        reasoning_preference = self._resolve_reasoning_preference(claude_model_name)
-        primary = self._target_from_ref(provider_model_ref)
-        if primary.provider_model != claude_model_name:
-            logger.debug(
-                "MODEL MAPPING: '{}' -> '{}'",
-                claude_model_name,
-                primary.provider_model,
-            )
+        # Model-Preserving Multi-Account Expansion:
+        # All healthy accounts for the exact target model are exhausted first
+        expanded_primary = self._expand_target_with_accounts(raw_primary)
+        primary = expanded_primary[0]
+        same_model_fallbacks = expanded_primary[1:]
+
+        # Subsequent degradation fallbacks
+        degradation_fallbacks: list[ProviderModelTarget] = []
+        for deg_target in self._fallback_targets(raw_primary):
+            expanded_deg = self._expand_target_with_accounts(deg_target)
+            degradation_fallbacks.extend(expanded_deg)
+
+        fallbacks = (*same_model_fallbacks, *degradation_fallbacks)
         return ResolvedModelRoute(
             original_model=claude_model_name,
             primary=primary,
-            fallbacks=self._fallback_targets(primary),
+            fallbacks=fallbacks,
             reasoning_preference=reasoning_preference,
         )
 

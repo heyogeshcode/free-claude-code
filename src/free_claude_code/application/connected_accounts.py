@@ -39,6 +39,7 @@ class ConnectedAccountStatus:
     user_code: str | None = None
     expires_at: int | None = None
     model_count: int | None = None
+    account_count: int | None = None
     message: str | None = None
     display_identity: str | None = None
     supported_login_modes: tuple[ConnectedAccountLoginMode, ...] = (
@@ -70,6 +71,7 @@ class ConnectedAccountStatus:
             ("user_code", self.user_code),
             ("expires_at", self.expires_at),
             ("model_count", self.model_count),
+            ("account_count", self.account_count),
             ("message", self.message),
         )
         for key, value in optional_fields:

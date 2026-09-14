@@ -127,3 +127,23 @@ def antigravity_signatures_path() -> Path:
     """Return the path to the cached Antigravity thought signatures."""
     return config_dir_path() / AUTH_DIRNAME / "antigravity_signatures.json"
 
+
+def accounts_config_path() -> Path:
+    """Return FCC multi-account configuration JSON path."""
+    return config_dir_path() / "accounts.json"
+
+
+def accounts_lock_path() -> Path:
+    """Return the cross-process lock path for accounts configuration."""
+    return config_dir_path() / "accounts.lock"
+
+
+def nvidia_key_state_path() -> Path:
+    """Return the persistent Nvidia key health state ledger path."""
+    return config_dir_path() / ".nvidia_key_state.json"
+
+
+def nvidia_default_keys_path() -> Path:
+    """Return the default discovered keys file path in the FCC directory."""
+    return config_dir_path() / "nvidia_working.txt"
+

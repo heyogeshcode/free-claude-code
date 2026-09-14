@@ -318,6 +318,14 @@ class Settings(BaseModel):
         default=None,
         validation_alias="NVIDIA_NIM_API_KEY",
     )
+    nvidia_fallback_api_key: OptionalNonEmptyString = Field(
+        default=None,
+        validation_alias="NVIDIA_FALLBACK_API_KEY",
+    )
+    nvidia_fallback_proxy: OptionalNonEmptyString = Field(
+        default=None,
+        validation_alias="NVIDIA_FALLBACK_PROXY",
+    )
 
     # ==================== LM Studio Config ====================
     lm_studio_base_url: NonEmptyString = Field(

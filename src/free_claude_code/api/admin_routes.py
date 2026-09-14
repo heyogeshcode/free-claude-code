@@ -230,6 +230,216 @@ async def disconnect_connected_account(
     return _no_store(status.as_dict())
 
 
+def _resolve_account_email(acc: object) -> str:
+    label = getattr(acc, "label", "") or ""
+    if "@" in label:
+        return label
+    creds = getattr(acc, "credentials", {}) or {}
+    if isinstance(creds, dict):
+        if "email" in creds and creds["email"]:
+            return str(creds["email"])
+        inner_creds = creds.get("credentials")
+        if isinstance(inner_creds, dict) and inner_creds.get("email"):
+            return str(inner_creds["email"])
+        id_token = creds.get("id_token")
+        if not id_token and isinstance(inner_creds, dict):
+            id_token = inner_creds.get("id_token")
+        if isinstance(id_token, str) and "." in id_token:
+            try:
+                import base64
+                import json
+
+                parts = id_token.split(".")
+                if len(parts) >= 2:
+                    padding = "=" * (4 - len(parts[1]) % 4)
+                    data = json.loads(base64.urlsafe_b64decode(parts[1] + padding))
+                    if "email" in data and data["email"]:
+                        return str(data["email"])
+                    profile = data.get("https://api.openai.com/profile")
+                    if isinstance(profile, dict) and profile.get("email"):
+                        return str(profile["email"])
+            except Exception:
+                pass
+    return label or getattr(acc, "id", "")
+
+
+def _serialize_accounts(provider_id: str) -> dict[str, object]:
+    from free_claude_code.application.account_store import get_account_store
+
+    store = get_account_store()
+    accounts = store.get_accounts(provider_id)
+
+    acc_pcts: list[float] = []
+    active_count = 0
+    cooling_count = 0
+    serialized_accounts = []
+
+    for acc in accounts:
+        email = _resolve_account_email(acc)
+        is_cooling = any(acc.is_cooling(m) for m in acc.model_cooldowns)
+        if acc.is_active() and not is_cooling:
+            active_count += 1
+            acc_pct = 100.0
+        elif acc.is_active() and is_cooling:
+            cooling_count += 1
+            max_rem = max(
+                (acc.cooldown_remaining(m) for m in acc.model_cooldowns),
+                default=0.0,
+            )
+            acc_pct = max(0.0, 100.0 - (max_rem / 60.0) * 100.0)
+        else:
+            acc_pct = 0.0
+        acc_pcts.append(acc_pct)
+
+        serialized_accounts.append(
+            {
+                "id": acc.id,
+                "label": email,
+                "raw_label": acc.label,
+                "email": email,
+                "priority": acc.priority,
+                "status": acc.status,
+                "is_cooling": is_cooling,
+                "cooling_models": [
+                    {
+                        "model": m,
+                        "remaining_seconds": round(acc.cooldown_remaining(m), 1),
+                    }
+                    for m in acc.model_cooldowns
+                    if acc.is_cooling(m)
+                ],
+                "remaining_pct": round(acc_pct, 1),
+            }
+        )
+
+    combined_pct = round(sum(acc_pcts) / len(acc_pcts)) if acc_pcts else 0
+
+    return {
+        "provider_id": provider_id,
+        "accounts": serialized_accounts,
+        "limit_summary": {
+            "remaining_pct": combined_pct,
+            "total_accounts": len(accounts),
+            "active_accounts": active_count,
+            "cooling_accounts": cooling_count,
+        },
+    }
+
+
+@router.get("/admin/api/providers/{provider_id}/accounts")
+async def list_provider_accounts(
+    provider_id: str,
+    request: Request,
+):
+    require_loopback_admin(request)
+    _require_connected_account_provider(provider_id)
+    return _no_store(_serialize_accounts(provider_id))
+
+
+@router.post("/admin/api/providers/{provider_id}/accounts/{account_id}/move-up")
+async def move_account_up(
+    provider_id: str,
+    account_id: str,
+    request: Request,
+):
+    require_loopback_admin(request)
+    _require_connected_account_provider(provider_id)
+    from free_claude_code.application.account_store import get_account_store
+    store = get_account_store()
+    success = store.move_up(provider_id, account_id)
+    return _no_store({"ok": success, **_serialize_accounts(provider_id)})
+
+
+@router.post("/admin/api/providers/{provider_id}/accounts/{account_id}/move-down")
+async def move_account_down(
+    provider_id: str,
+    account_id: str,
+    request: Request,
+):
+    require_loopback_admin(request)
+    _require_connected_account_provider(provider_id)
+    from free_claude_code.application.account_store import get_account_store
+    store = get_account_store()
+    success = store.move_down(provider_id, account_id)
+    return _no_store({"ok": success, **_serialize_accounts(provider_id)})
+
+
+@router.delete("/admin/api/providers/{provider_id}/accounts/{account_id}")
+async def delete_provider_account(
+    provider_id: str,
+    account_id: str,
+    request: Request,
+):
+    require_loopback_admin(request)
+    _require_connected_account_provider(provider_id)
+    from free_claude_code.application.account_store import get_account_store
+    store = get_account_store()
+    success = store.delete_account(provider_id, account_id)
+    return _no_store({"ok": success, **_serialize_accounts(provider_id)})
+
+
+@router.post("/admin/api/providers/{provider_id}/accounts/{account_id}/clear-cooldown")
+async def clear_account_cooldown(
+    provider_id: str,
+    account_id: str,
+    request: Request,
+):
+    require_loopback_admin(request)
+    _require_connected_account_provider(provider_id)
+    from free_claude_code.application.account_store import get_account_store
+    store = get_account_store()
+    acc = store.get_account_by_id(provider_id, account_id)
+    if acc:
+        acc.model_cooldowns.clear()
+        store.save()
+    return _no_store({"ok": True, **_serialize_accounts(provider_id)})
+
+
+@router.get("/admin/api/oauth/limits")
+async def oauth_limits(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+):
+    require_loopback_admin(request)
+    from free_claude_code.application.account_store import get_account_store
+
+    store = get_account_store()
+    provider_names = {
+        "antigravity": "Google Antigravity",
+        "openai": "OpenAI / ChatGPT",
+        "github_copilot": "GitHub Copilot",
+    }
+
+    results = []
+    for provider_id in ("antigravity", "openai", "github_copilot"):
+        try:
+            acc_status = await services.admin.connected_account_status(provider_id)
+            if not acc_status.connected:
+                continue
+        except Exception:
+            continue
+
+        data = _serialize_accounts(provider_id)
+        accounts = data.get("accounts", [])
+        if not accounts:
+            continue
+
+        summary = data.get("limit_summary", {})
+        results.append(
+            {
+                "provider_id": provider_id,
+                "display_name": provider_names.get(provider_id, provider_id),
+                "remaining_pct": summary.get("remaining_pct", 100),
+                "total_accounts": summary.get("total_accounts", len(accounts)),
+                "active_accounts": summary.get("active_accounts", len(accounts)),
+                "cooling_accounts": summary.get("cooling_accounts", 0),
+                "accounts": accounts,
+            }
+        )
+
+    return _no_store({"providers": results})
+
+
 @router.get("/admin/api/models")
 async def models(
     request: Request,

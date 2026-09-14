@@ -125,6 +125,7 @@ class _Credentials:
             "refresh_token": self.refresh_token,
             "id_token": self.id_token,
             "account_id": self.account_id,
+            "email": self.email,
             "expires_at": self.expires_at,
             "fedramp": self.fedramp,
         }
@@ -498,6 +499,20 @@ class OpenAIAuthManager:
             os.chmod(temporary, 0o600)
             os.replace(temporary, path)
             os.chmod(path, 0o600)
+            import contextlib
+            with contextlib.suppress(Exception):
+                from free_claude_code.application.account_store import get_account_store
+                store = get_account_store()
+                if store is not None:
+                    email = credentials.email or credentials.account_id
+                    label = credentials.email or email or "OpenAI / ChatGPT"
+                    acc_id = f"openai_{email}" if email else f"openai_{uuid.uuid4().hex[:8]}"
+                    store.add_account(
+                        "openai",
+                        label=label,
+                        credentials=credentials.as_json(),
+                        account_id=acc_id,
+                    )
         finally:
             temporary.unlink(missing_ok=True)
 

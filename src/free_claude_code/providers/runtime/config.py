@@ -18,10 +18,25 @@ def provider_credential(
     descriptor: ProviderDescriptor, settings: Settings
 ) -> str | None:
     """Return the configured credential for a provider descriptor."""
+    if descriptor.credential_attr:
+        cred = string_setting(settings, descriptor.credential_attr)
+        if cred:
+            return cred
+    if descriptor.provider_id == "nvidia_fallback":
+        try:
+            from free_claude_code.core.nvidia_key_store import get_nvidia_key_store
+
+            store = get_nvidia_key_store()
+            healthy = store.get_healthy_keys()
+            if healthy:
+                return healthy[0]
+            all_keys = store.get_all_keys()
+            if all_keys:
+                return all_keys[0]
+        except Exception:
+            pass
     if descriptor.static_credential is not None:
         return descriptor.static_credential
-    if descriptor.credential_attr:
-        return string_setting(settings, descriptor.credential_attr)
     return None
 
 

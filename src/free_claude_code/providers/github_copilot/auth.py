@@ -453,6 +453,20 @@ class CopilotAuthManager:
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(temporary, self._state_path)
+            if enabled and identity:
+                import contextlib
+                with contextlib.suppress(Exception):
+                    from free_claude_code.application.account_store import get_account_store
+                    store = get_account_store()
+                    if store is not None:
+                        label = f"Copilot ({identity.login}@{identity.host})"
+                        acc_id = f"copilot_{identity.login}"
+                        store.add_account(
+                            "github_copilot",
+                            label=label,
+                            credentials={"host": identity.host, "login": identity.login},
+                            account_id=acc_id,
+                        )
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)

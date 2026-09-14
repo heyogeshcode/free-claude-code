@@ -1,6 +1,7 @@
 """FastAPI route handlers."""
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 from loguru import logger
 
 from free_claude_code.application.errors import ApplicationError
@@ -12,6 +13,8 @@ from free_claude_code.core.anthropic import (
     TokenCountRequest,
     get_token_count,
 )
+from free_claude_code.core.nvidia_hedging import get_nvidia_hedging_engine
+from free_claude_code.core.nvidia_normalizer import NvidiaSchemaNormalizer
 from free_claude_code.core.openai_responses import OpenAIResponsesRequest
 from free_claude_code.core.trace import trace_event
 
@@ -267,3 +270,104 @@ async def stop_cli(
     )
     logger.info("STOP_CLI: source=messaging_workflow cancelled_count={}", count)
     return {"status": "stopped", "cancelled_count": count}
+
+
+# ==================== NVIDIA Dual Route Architecture ====================
+
+
+async def _handle_nvidia_request(
+    request: Request,
+    provider_name: str,
+    services: ApiServices,
+) -> object:
+    request_id = get_request_id(request)
+    body = await request.json()
+
+    # Detect if client requested Anthropic wire format
+    is_anthropic = (
+        "anthropic-version" in request.headers
+        or "x-api-key" in request.headers
+        or request.url.path.endswith("/messages")
+        or ("messages" in body and "max_tokens" in body)
+    )
+
+    model_name = body.get("model", "meta/llama-3.3-70b-instruct")
+    if "/" in model_name:
+        parts = model_name.split("/", 1)
+        if parts[0] in ("nvidia_nim", "nvidia_fallback", "anthropic"):
+            model_name = parts[1]
+
+    if provider_name == "nvidia_nim" and is_anthropic:
+        req_copy = dict(body)
+        req_copy["model"] = f"nvidia_nim/{model_name}"
+        msg_req = MessagesRequest.model_validate(req_copy)
+        return await _create_messages_response(
+            services, msg_req, request_id=request_id
+        )
+
+    # For nvidia_fallback (or direct OpenAI chat on nvidia_nim), route via Hedging Engine
+    if is_anthropic:
+        openai_body = NvidiaSchemaNormalizer.anthropic_to_openai_chat(
+            body,
+            stream=True,
+            default_model=model_name,
+        )
+        engine = get_nvidia_hedging_engine()
+        stream = engine.stream_chat_completions(
+            openai_body,
+            model=model_name,
+            message_id=f"msg_{request_id}",
+            is_anthropic_wire=True,
+        )
+        return StreamingResponse(stream, media_type="text/event-stream")
+    else:
+        openai_body = dict(body)
+        openai_body["model"] = model_name
+        openai_body["stream"] = True
+        engine = get_nvidia_hedging_engine()
+        stream = engine.stream_chat_completions(
+            openai_body,
+            model=model_name,
+            message_id=f"msg_{request_id}",
+            is_anthropic_wire=False,
+        )
+        return StreamingResponse(stream, media_type="text/event-stream")
+
+
+@router.post("/v1/nvidia_nim")
+@router.post("/v1/nvidia_nim/chat/completions")
+@router.post("/v1/nvidia_nim/messages")
+async def nvidia_nim_route(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+    _auth=Depends(require_proxy_auth),
+):
+    """Dedicated NVIDIA NIM route."""
+    return await _handle_nvidia_request(request, "nvidia_nim", services)
+
+
+@router.api_route("/v1/nvidia_nim", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/nvidia_nim/chat/completions", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/nvidia_nim/messages", methods=["HEAD", "OPTIONS"])
+async def probe_nvidia_nim(_auth=Depends(require_proxy_auth)):
+    return _probe_response("POST, HEAD, OPTIONS")
+
+
+@router.post("/v1/nvidia_fallback")
+@router.post("/v1/nvidia_fallback/chat/completions")
+@router.post("/v1/nvidia_fallback/messages")
+async def nvidia_fallback_route(
+    request: Request,
+    services: ApiServices = Depends(get_services),
+    _auth=Depends(require_proxy_auth),
+):
+    """Hedged multi-key speculative parallel racing route."""
+    return await _handle_nvidia_request(request, "nvidia_fallback", services)
+
+
+@router.api_route("/v1/nvidia_fallback", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/nvidia_fallback/chat/completions", methods=["HEAD", "OPTIONS"])
+@router.api_route("/v1/nvidia_fallback/messages", methods=["HEAD", "OPTIONS"])
+async def probe_nvidia_fallback(_auth=Depends(require_proxy_auth)):
+    return _probe_response("POST, HEAD, OPTIONS")
+

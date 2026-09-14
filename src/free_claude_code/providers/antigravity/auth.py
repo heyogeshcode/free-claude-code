@@ -15,6 +15,10 @@ from typing import Any
 import httpx
 from loguru import logger
 
+from free_claude_code.application.account_store import (
+    current_account_id,
+    get_account_store,
+)
 from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
     ConnectedAccountState,
@@ -271,6 +275,18 @@ class AntigravityAuthManager:
             if os.name != "nt":
                 with contextlib.suppress(OSError):
                     os.chmod(self._credential_path, 0o600)
+            with contextlib.suppress(Exception):
+                from free_claude_code.application.account_store import get_account_store
+                store = get_account_store()
+                if store is not None:
+                    label = creds.email or f"Antigravity ({creds.project_id or 'default'})"
+                    acc_id = f"ag_{creds.email}" if creds.email else f"ag_{uuid.uuid4().hex[:8]}"
+                    store.add_account(
+                        "antigravity",
+                        label=label,
+                        credentials=creds.as_json(),
+                        account_id=acc_id,
+                    )
         finally:
             temp_path.unlink(missing_ok=True)
 
@@ -425,10 +441,48 @@ class AntigravityAuthManager:
 
         return self.status()
 
-    async def access(self, *, force_refresh: bool = False) -> AntigravityAccess:
+    async def access(
+        self,
+        *,
+        force_refresh: bool = False,
+        account_id: str | None = None,
+    ) -> AntigravityAccess:
         """Return valid access token, auto-refreshing if expired or forced."""
         if self._closed:
             raise AntigravityReconnectRequired("Antigravity auth manager is closed.")
+
+        bound_account_id = account_id or current_account_id.get()
+        if bound_account_id:
+            store = get_account_store()
+            account = store.get_account_by_id(self.provider_id, bound_account_id)
+            if account and account.credentials:
+                try:
+                    creds = _Credentials.from_json(account.credentials)
+                    now = int(time.time())
+                    needs_refresh = force_refresh or (
+                        now >= creds.expires_at - REFRESH_EARLY_SECONDS
+                    )
+                    if not needs_refresh:
+                        return AntigravityAccess(
+                            access_token=creds.access_token,
+                            project_id=creds.project_id,
+                        )
+                    refreshed = await self._refresh_token(creds)
+                    store.update_account(
+                        self.provider_id,
+                        bound_account_id,
+                        credentials=refreshed.as_json(),
+                    )
+                    return AntigravityAccess(
+                        access_token=refreshed.access_token,
+                        project_id=refreshed.project_id,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Multi-account access failed for account '{}': {}",
+                        bound_account_id,
+                        exc,
+                    )
 
         async with self._lock:
             if self._credentials is None:

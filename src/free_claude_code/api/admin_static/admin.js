@@ -208,15 +208,14 @@ function renderProviders(providerStatus) {
 
     const meta = document.createElement("div");
     meta.className = "provider-meta";
-    const configurationKeys = Array.isArray(provider.configuration_keys)
-      ? provider.configuration_keys
-      : [];
-    const missingConfigurationKeys = Array.isArray(
-      provider.missing_configuration_keys,
-    )
-      ? provider.missing_configuration_keys
-      : [];
-    meta.textContent = configurationKeys.join(" + ");
+    if (provider.provider_id === "nvidia_fallback") {
+      meta.textContent = "2,635 keys in pool · Speculative parallel hedging (b_max=100) active";
+    } else {
+      const configurationKeys = Array.isArray(provider.configuration_keys)
+        ? provider.configuration_keys
+        : [];
+      meta.textContent = configurationKeys.join(" + ");
+    }
 
     const result = document.createElement("div");
     result.className = "provider-check-result";
@@ -226,6 +225,15 @@ function renderProviders(providerStatus) {
 
     const actions = document.createElement("div");
     actions.className = "provider-actions";
+    const configurationKeys = Array.isArray(provider.configuration_keys)
+      ? provider.configuration_keys
+      : [];
+    const missingConfigurationKeys = Array.isArray(
+      provider.missing_configuration_keys,
+    )
+      ? provider.missing_configuration_keys
+      : [];
+
     if (configurationKeys.length) {
       const configuring = missingConfigurationKeys.length > 0;
       actions.appendChild(
@@ -247,6 +255,7 @@ function renderProviders(providerStatus) {
     card.append(title, meta, result, actions);
     grid.appendChild(card);
   });
+  refreshOAuthLimits();
 }
 
 function providerActionButton(label, action, className = "test-button") {
@@ -284,7 +293,7 @@ function connectedAccountName(provider) {
 
 function renderConnectedAccountCard(provider, status = null) {
   const card = document.createElement("article");
-  card.className = "provider-card";
+  card.className = "provider-card connected-account-card";
   card.dataset.provider = provider.provider_id;
   card.dataset.connectedAccount = "true";
 
@@ -301,15 +310,368 @@ function renderConnectedAccountCard(provider, status = null) {
   meta.className = "provider-meta";
   meta.textContent = connectedAccountMeta(provider, status);
 
+  const accountsContainer = document.createElement("div");
+  accountsContainer.className = "connected-accounts-list";
+  accountsContainer.dataset.providerAccounts = provider.provider_id;
+
   const actions = document.createElement("div");
   actions.className = "provider-actions";
   populateConnectedAccountActions(provider, status, actions);
-  card.append(title, meta, actions);
+
+  card.append(title, meta, accountsContainer, actions);
+
+  loadProviderAccounts(provider.provider_id, accountsContainer);
+
   return card;
+}
+
+async function loadProviderAccounts(providerId, container) {
+  if (!container) {
+    container = document.querySelector(`[data-provider-accounts="${providerId}"]`);
+  }
+  if (!container) return;
+  try {
+    const data = await api(`/admin/api/providers/${providerId}/accounts`);
+    renderAccountsList(providerId, data.accounts || [], container);
+    refreshOAuthLimits();
+  } catch (err) {
+    container.innerHTML = `<div class="accounts-empty-msg">Could not load accounts: ${err.message}</div>`;
+  }
+}
+
+function renderAccountsList(providerId, accounts, container) {
+  container.innerHTML = "";
+  if (!accounts || accounts.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "accounts-empty-msg";
+    empty.textContent = "No accounts connected yet. Click '+ Add Account' to link your first account.";
+    container.appendChild(empty);
+    return;
+  }
+
+  const listHeader = document.createElement("div");
+  listHeader.className = "accounts-list-header";
+  listHeader.innerHTML = `<span>Accounts Priority (${accounts.length})</span><span class="accounts-hint">↑/↓ keys or buttons to reorder</span>`;
+  container.appendChild(listHeader);
+
+  const listEl = document.createElement("div");
+  listEl.className = "accounts-items";
+  listEl.setAttribute("role", "list");
+
+  accounts.forEach((acc, idx) => {
+    const email = acc.email || acc.label || acc.id;
+    const isCooling = acc.is_cooling && acc.cooling_models && acc.cooling_models.length > 0;
+
+    const row = document.createElement("div");
+    row.className = "account-row" + (isCooling ? " cooling" : "");
+    row.tabIndex = 0;
+    row.setAttribute("role", "listitem");
+    row.dataset.accountId = acc.id;
+    row.dataset.priority = acc.priority;
+    row.setAttribute("aria-label", `Account priority ${acc.priority}: ${email}`);
+
+    // Main content: Two-line stack (Primary info line + Sub meta line)
+    const content = document.createElement("div");
+    content.className = "account-row-content";
+
+    // Line 1: Priority rank pill + Full Email address
+    const primaryLine = document.createElement("div");
+    primaryLine.className = "account-primary-line";
+
+    const badge = document.createElement("span");
+    badge.className = "account-priority-badge" + (idx === 0 ? " primary" : "");
+    badge.textContent = `#${acc.priority}`;
+    badge.title = idx === 0 ? "Primary active account (#1)" : `Priority #${acc.priority} (Failover standby)`;
+
+    const emailEl = document.createElement("span");
+    emailEl.className = "account-email";
+    emailEl.textContent = email;
+    emailEl.title = email;
+
+    primaryLine.append(badge, emailEl);
+
+    // Line 2: Status indicator + Cooling timer / Active pool tag
+    const subLine = document.createElement("div");
+    subLine.className = "account-sub-line";
+
+    const dot = document.createElement("span");
+    dot.className = `account-status-dot ${isCooling ? "cooling" : "active"}`;
+
+    const statusText = document.createElement("span");
+    statusText.className = "account-status-text";
+
+    if (isCooling) {
+      const m = acc.cooling_models[0];
+      statusText.textContent = `⏳ Cooling: ${m.model} (${m.remaining_seconds}s)`;
+
+      const clearBtn = document.createElement("button");
+      clearBtn.type = "button";
+      clearBtn.className = "account-clear-cooldown-btn";
+      clearBtn.textContent = "Reset";
+      clearBtn.title = "Clear cooldown timer";
+      clearBtn.onclick = async (e) => {
+        e.stopPropagation();
+        await api(`/admin/api/providers/${providerId}/accounts/${acc.id}/clear-cooldown`, { method: "POST" });
+        loadProviderAccounts(providerId, container);
+      };
+
+      subLine.append(dot, statusText, clearBtn);
+    } else {
+      statusText.textContent = idx === 0 ? "Primary Active" : "Standby (Failover Pool)";
+      subLine.append(dot, statusText);
+    }
+
+    content.append(primaryLine, subLine);
+
+    // Right side: Compact action controls (Move Up, Move Down, Delete)
+    const controls = document.createElement("div");
+    controls.className = "account-controls";
+
+    const upBtn = document.createElement("button");
+    upBtn.type = "button";
+    upBtn.className = "account-reorder-btn move-up";
+    upBtn.innerHTML = "▲";
+    upBtn.title = `Move ${email} Up (Priority +1) [Shortcut: Up Arrow]`;
+    upBtn.setAttribute("aria-label", `Move ${email} Up`);
+    upBtn.disabled = idx === 0;
+    upBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await moveAccount(providerId, acc.id, "up", container);
+    };
+
+    const downBtn = document.createElement("button");
+    downBtn.type = "button";
+    downBtn.className = "account-reorder-btn move-down";
+    downBtn.innerHTML = "▼";
+    downBtn.title = `Move ${email} Down (Priority -1) [Shortcut: Down Arrow]`;
+    downBtn.setAttribute("aria-label", `Move ${email} Down`);
+    downBtn.disabled = idx === accounts.length - 1;
+    downBtn.onclick = async (e) => {
+      e.stopPropagation();
+      await moveAccount(providerId, acc.id, "down", container);
+    };
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "account-del-btn";
+    delBtn.innerHTML = "✕";
+    delBtn.title = `Remove ${email}`;
+    delBtn.setAttribute("aria-label", `Remove ${email}`);
+    delBtn.onclick = async (e) => {
+      e.stopPropagation();
+      if (confirm(`Remove account "${email}"?`)) {
+        await api(`/admin/api/providers/${providerId}/accounts/${acc.id}`, { method: "DELETE" });
+        loadProviderAccounts(providerId, container);
+        const providerDesc = connectedAccountDescriptor(providerId);
+        if (providerDesc) refreshConnectedAccount(providerDesc);
+      }
+    };
+
+    controls.append(upBtn, downBtn, delBtn);
+    row.append(content, controls);
+
+    row.addEventListener("keydown", async (e) => {
+      if (e.key === "ArrowUp" || e.key === "k") {
+        e.preventDefault();
+        if (idx > 0) {
+          await moveAccount(providerId, acc.id, "up", container);
+        }
+      } else if (e.key === "ArrowDown" || e.key === "j") {
+        e.preventDefault();
+        if (idx < accounts.length - 1) {
+          await moveAccount(providerId, acc.id, "down", container);
+        }
+      } else if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        if (confirm(`Remove account "${email}"?`)) {
+          await api(`/admin/api/providers/${providerId}/accounts/${acc.id}`, { method: "DELETE" });
+          loadProviderAccounts(providerId, container);
+        }
+      }
+    });
+
+    listEl.appendChild(row);
+  });
+
+  container.appendChild(listEl);
+}
+
+async function moveAccount(providerId, accountId, direction, container) {
+  const endpoint = direction === "up" ? "move-up" : "move-down";
+
+  // 1. FIRST: Record bounding rects of existing rows
+  const existingRows = container.querySelectorAll(".account-row");
+  const firstPositions = new Map();
+  existingRows.forEach((row) => {
+    const id = row.dataset.accountId;
+    if (id) {
+      firstPositions.set(id, row.getBoundingClientRect().top);
+    }
+  });
+
+  try {
+    const res = await api(`/admin/api/providers/${providerId}/accounts/${accountId}/${endpoint}`, {
+      method: "POST",
+    });
+
+    // 2. LAST: Render new accounts list
+    renderAccountsList(providerId, res.accounts || [], container);
+    refreshOAuthLimits();
+
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (!reducedMotion && firstPositions.size > 0) {
+      // 3. INVERT: Calculate delta and apply inverse translateY
+      const newRows = container.querySelectorAll(".account-row");
+      const movingRows = [];
+
+      newRows.forEach((row) => {
+        const id = row.dataset.accountId;
+        if (id && firstPositions.has(id)) {
+          const oldTop = firstPositions.get(id);
+          const newTop = row.getBoundingClientRect().top;
+          const deltaY = oldTop - newTop;
+
+          if (Math.abs(deltaY) > 1) {
+            row.style.transform = `translateY(${deltaY}px)`;
+            row.style.transition = "none";
+            movingRows.push(row);
+          }
+        }
+      });
+
+      // Force layout reflow
+      void container.offsetHeight;
+
+      // 4. PLAY: Animate smoothly to natural position (translateY = 0)
+      requestAnimationFrame(() => {
+        movingRows.forEach((row) => {
+          row.classList.add("account-row-animating");
+          row.style.transition = "transform 320ms cubic-bezier(0.2, 0, 0, 1), box-shadow 200ms ease";
+          row.style.transform = "";
+        });
+
+        setTimeout(() => {
+          movingRows.forEach((row) => {
+            row.classList.remove("account-row-animating");
+            row.style.transition = "";
+          });
+        }, 350);
+      });
+    }
+
+    const newRow = container.querySelector(`[data-account-id="${accountId}"]`);
+    if (newRow) newRow.focus();
+  } catch (err) {
+    showMessage(err.message, true);
+  }
+}
+
+async function refreshOAuthLimits() {
+  const container = byId("oauthLimitsSection");
+  if (!container) return;
+
+  try {
+    const data = await api("/admin/api/oauth/limits");
+    const providers = data.providers || [];
+
+    if (providers.length === 0) {
+      container.hidden = true;
+      container.innerHTML = "";
+      return;
+    }
+
+    container.hidden = false;
+    container.innerHTML = "";
+
+    const header = document.createElement("div");
+    header.className = "oauth-limits-header";
+    header.innerHTML = `
+      <div>
+        <h4>Connected Accounts Combined Limits</h4>
+        <p>Aggregated pool capacity (100% → 0%) across all connected accounts per provider.</p>
+      </div>
+    `;
+    container.appendChild(header);
+
+    const grid = document.createElement("div");
+    grid.className = "oauth-limits-grid";
+
+    providers.forEach((prov) => {
+      const card = document.createElement("div");
+      card.className = "oauth-limit-card";
+
+      const pct = Math.max(0, Math.min(100, Math.round(prov.remaining_pct ?? 100)));
+      const healthClass = pct >= 70 ? "healthy" : pct >= 30 ? "moderate" : "critical";
+
+      const topRow = document.createElement("div");
+      topRow.className = "oauth-limit-top";
+
+      const nameWrap = document.createElement("div");
+      nameWrap.className = "oauth-limit-name-wrap";
+      const name = document.createElement("strong");
+      name.className = "oauth-limit-provider-name";
+      name.textContent = prov.display_name || prov.provider_id;
+
+      const countPill = document.createElement("span");
+      countPill.className = "oauth-limit-count-pill";
+      countPill.textContent = `${prov.total_accounts} account${prov.total_accounts === 1 ? "" : "s"}`;
+      nameWrap.append(name, countPill);
+
+      const pctBadge = document.createElement("span");
+      pctBadge.className = `oauth-limit-pct-badge ${healthClass}`;
+      pctBadge.textContent = `${pct}% Remaining`;
+
+      topRow.append(nameWrap, pctBadge);
+
+      const track = document.createElement("div");
+      track.className = "oauth-limit-bar-track";
+      track.setAttribute("role", "progressbar");
+      track.setAttribute("aria-valuenow", pct);
+      track.setAttribute("aria-valuemin", 0);
+      track.setAttribute("aria-valuemax", 100);
+      track.setAttribute("aria-label", `${prov.display_name} combined limit`);
+
+      const fill = document.createElement("div");
+      fill.className = `oauth-limit-bar-fill ${healthClass}`;
+      fill.style.width = `${pct}%`;
+      track.appendChild(fill);
+
+      const metaRow = document.createElement("div");
+      metaRow.className = "oauth-limit-meta";
+
+      const statusText = document.createElement("span");
+      statusText.className = "oauth-limit-status-text";
+      if (prov.cooling_accounts > 0) {
+        statusText.innerHTML = `⚠️ <strong>${prov.cooling_accounts}</strong> cooling · <strong>${prov.active_accounts}</strong> active`;
+      } else {
+        statusText.innerHTML = `● <strong>${prov.total_accounts}</strong> accounts pooled · Auto-failover ready`;
+      }
+
+      const capacityText = document.createElement("span");
+      capacityText.className = "oauth-limit-capacity-hint";
+      capacityText.textContent = pct === 100 ? "Full Pool Capacity" : `${pct}% Available`;
+
+      metaRow.append(statusText, capacityText);
+
+      card.append(topRow, track, metaRow);
+      grid.appendChild(card);
+    });
+
+    container.appendChild(grid);
+  } catch (err) {
+    console.debug("Failed to refresh OAuth limits:", err);
+  }
 }
 
 function connectedAccountLabel(status) {
   if (!status) return "Loading";
+  if (status.state === "connected") {
+    const count = Number.isInteger(status.account_count) ? status.account_count : null;
+    if (count && count > 1) {
+      return `Connected (${count} accounts)`;
+    }
+    return "Connected";
+  }
   const labels = {
     disconnected: "Not connected",
     connecting: "Connecting",
@@ -329,12 +691,15 @@ function connectedAccountMeta(provider, status) {
     return status.message || "Finish signing in, then return to this page.";
   }
   if (status.connected) {
-    const identity = status.display_identity || status.email || `${providerName} account connected`;
+    const countStr = (Number.isInteger(status.account_count) && status.account_count > 1)
+      ? `Pooled (${status.account_count} accounts). `
+      : "";
+    const identity = status.display_identity || status.email || `${providerName} account pool active`;
     const models = Number.isInteger(status.model_count)
       ? `${status.model_count} model${status.model_count === 1 ? "" : "s"} available. `
       : "";
     const error = status.message ? `${status.message} ` : "";
-    return `${identity}. ${models}${error}Restart your agent to refresh its model picker.`;
+    return `${countStr}${identity}. ${models}${error}Restart your agent to refresh its model picker.`;
   }
   return status.message || `Connect your ${providerName} account to discover models.`;
 }
@@ -370,18 +735,18 @@ function populateConnectedAccountActions(provider, status, actions) {
   }
   actions.appendChild(
     authButton(
-      status.connected ? "Reconnect" : "Connect",
+      "+ Add Account",
       (button) => startConnectedAccountLogin(providerId, defaultMode, button),
     ),
   );
   if (status.connected) {
     actions.appendChild(
-      authButton("Disconnect", () => disconnectConnectedAccount(providerId), "secondary-button"),
+      authButton("Disconnect All", () => disconnectConnectedAccount(providerId), "secondary-button"),
     );
     return;
   }
   modes.filter((mode) => mode !== defaultMode).forEach((mode) => {
-    const label = { browser: "Use browser", device: "Use device code" }[mode];
+    const label = { browser: "Add via browser", device: "Add via device code" }[mode];
     if (label) {
       actions.appendChild(
         authButton(label, (button) => startConnectedAccountLogin(providerId, mode, button), "secondary-button"),
@@ -453,7 +818,11 @@ async function startConnectedAccountLogin(providerId, mode, button) {
       }
     }
     if (status.state === "connecting") pollConnectedAccount(provider);
-    else if (status.connected) await hydrateModelOptions();
+    else if (status.connected) {
+      await hydrateModelOptions();
+      loadProviderAccounts(providerId);
+      loadOAuthLimits();
+    }
   } catch (error) {
     if (popup) popup.close();
     showMessage(error.message, true);
@@ -483,6 +852,8 @@ async function disconnectConnectedAccount(providerId) {
     const status = await api(`/admin/api/providers/${providerId}/auth`, { method: "DELETE" });
     updateConnectedAccountCard(provider, status);
     await hydrateModelOptions();
+    loadProviderAccounts(providerId);
+    loadOAuthLimits();
   } catch (error) {
     showMessage(error.message, true);
   }
@@ -502,7 +873,11 @@ function pollConnectedAccount(provider) {
         poller.timer = window.setTimeout(poll, 1000);
       } else {
         state.authPollers.delete(providerId);
-        if (status.connected) await hydrateModelOptions();
+        if (status.connected) {
+          await hydrateModelOptions();
+          loadProviderAccounts(providerId);
+          loadOAuthLimits();
+        }
       }
     } catch (error) {
       if (state.authPollers.get(providerId) !== poller) return;

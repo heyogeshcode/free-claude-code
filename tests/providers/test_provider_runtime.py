@@ -50,6 +50,7 @@ from free_claude_code.providers.groq import GroqProvider
 from free_claude_code.providers.kilo import KiloProvider
 from free_claude_code.providers.lmstudio import LMStudioProvider
 from free_claude_code.providers.mistral import MistralProvider
+from free_claude_code.providers.nvidia_fallback import NvidiaFallbackProvider
 from free_claude_code.providers.nvidia_nim import NvidiaNimProvider
 from free_claude_code.providers.open_router import OpenRouterProvider
 from free_claude_code.providers.openai_chat import (
@@ -898,6 +899,7 @@ def test_create_provider_instantiates_each_builtin():
         "kilo": KiloProvider,
         "cerebras": OpenAIChatProvider,
         "antigravity": AntigravityProvider,
+        "nvidia_fallback": NvidiaFallbackProvider,
     }
     sentinel_admission = MagicMock(spec=ProviderAdmissionController)
     auth = MagicMock()

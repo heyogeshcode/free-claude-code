@@ -16,3 +16,11 @@ llama_cache
 .smoke-results
 /test-results/
 .vscode
+
+# Nvidia key pool and state safeguards
+nvidia_working.txt
+*.state.json
+.nvidia_*
+.nvidia_key_state.json
+accounts.json
+.accounts.json

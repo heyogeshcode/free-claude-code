@@ -36,6 +36,16 @@ def _create_nvidia_nim(
     )
 
 
+def _create_nvidia_fallback(
+    config: ProviderConfig,
+    _settings: Settings,
+    admission: ProviderAdmissionController,
+) -> BaseProvider:
+    from free_claude_code.providers.nvidia_fallback import NvidiaFallbackProvider
+
+    return NvidiaFallbackProvider(config, admission=admission)
+
+
 def _create_open_router(
     config: ProviderConfig,
     _settings: Settings,
@@ -157,6 +167,7 @@ def _create_opencode_go(
 
 _SPECIAL_PROVIDER_FACTORIES: dict[str, ProviderFactory] = {
     "nvidia_nim": _create_nvidia_nim,
+    "nvidia_fallback": _create_nvidia_fallback,
     "open_router": _create_open_router,
     "mistral": _create_mistral,
     "kilo": _create_kilo,

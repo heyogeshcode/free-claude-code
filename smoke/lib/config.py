@@ -292,6 +292,8 @@ class SmokeConfig:
         return bool(os.getenv(f"FCC_SMOKE_MODEL_{provider.upper()}"))
 
     def has_provider_configuration(self, provider: str) -> bool:
+        if provider == "nvidia_fallback":
+            return bool(os.getenv("FCC_SMOKE_MODEL_NVIDIA_FALLBACK"))
         descriptor = PROVIDER_CATALOG.get(provider)
         if descriptor is None:
             return False

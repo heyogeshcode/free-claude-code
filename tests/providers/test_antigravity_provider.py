@@ -325,9 +325,7 @@ async def test_codex_stream_responses_sanitization(provider_config):
                 {
                     "type": "message",
                     "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "What is the weather?"}
-                    ],
+                    "content": [{"type": "input_text", "text": "What is the weather?"}],
                 }
             ],
             tools=[
@@ -381,4 +379,3 @@ async def test_codex_stream_responses_sanitization(provider_config):
     finally:
         await provider.cleanup()
         await client.aclose()
-
