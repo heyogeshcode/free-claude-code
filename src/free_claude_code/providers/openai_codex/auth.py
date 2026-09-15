@@ -125,7 +125,6 @@ class _Credentials:
             "refresh_token": self.refresh_token,
             "id_token": self.id_token,
             "account_id": self.account_id,
-            "email": self.email,
             "expires_at": self.expires_at,
             "fedramp": self.fedramp,
         }

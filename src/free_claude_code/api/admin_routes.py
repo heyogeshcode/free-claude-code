@@ -21,6 +21,13 @@ from free_claude_code.application.connected_accounts import (
     ConnectedAccountLoginMode,
 )
 from free_claude_code.application.model_metadata import ProviderModelRefreshResult
+from free_claude_code.providers.antigravity.quota import (
+    ANTHROPIC_GPT_POOL_ID,
+    GEMINI_POOL_ID,
+    AntigravityPoolQuota,
+    fetch_account_quota,
+    get_cached_account_quota,
+)
 from free_claude_code.config.admin.manifest import FIELD_BY_KEY
 from free_claude_code.config.admin.values import load_config_response, load_value_state
 from free_claude_code.config.model_refs import configured_chat_model_refs
@@ -263,7 +270,55 @@ def _resolve_account_email(acc: object) -> str:
     return label or getattr(acc, "id", "")
 
 
-def _serialize_accounts(provider_id: str) -> dict[str, object]:
+async def _fetch_antigravity_quotas_for_accounts(
+    accounts: list[Any],
+    services: ApiServices | None = None,
+) -> dict[str, dict[str, AntigravityPoolQuota]]:
+    """Asynchronously fetch quota for all Antigravity accounts concurrently."""
+    import httpx
+    from free_claude_code.providers.antigravity.auth import AntigravityAuthManager
+
+    auth = None
+    if services is not None:
+        mgr = getattr(services.admin, "_connected_accounts", {}).get("antigravity")
+        if isinstance(mgr, AntigravityAuthManager) and mgr.is_connected():
+            auth = mgr
+    if auth is None:
+        return {}
+
+    results: dict[str, dict[str, AntigravityPoolQuota]] = {}
+    try:
+        async with httpx.AsyncClient() as client:
+
+            async def fetch_one(acc: Any) -> None:
+                try:
+                    access = await auth.access(account_id=acc.id)
+                    pools = await fetch_account_quota(
+                        client,
+                        access.access_token,
+                        acc.id,
+                        project_id=access.project_id,
+                    )
+                    results[acc.id] = pools
+                except Exception as exc:
+                    logger.debug("Quota fetch failed for account {}: {}", acc.id, exc)
+                    cached = get_cached_account_quota(acc.id)
+                    if cached:
+                        results[acc.id] = cached
+
+            tasks = [fetch_one(acc) for acc in accounts]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception as exc:
+        logger.debug("Antigravity quota batch fetch error: {}", exc)
+
+    return results
+
+
+def _serialize_accounts(
+    provider_id: str,
+    quotas_by_account: dict[str, dict[str, AntigravityPoolQuota]] | None = None,
+) -> dict[str, object]:
     from free_claude_code.application.account_store import get_account_store
 
     store = get_account_store()
@@ -274,12 +329,41 @@ def _serialize_accounts(provider_id: str) -> dict[str, object]:
     cooling_count = 0
     serialized_accounts = []
 
+    gemini_pool_pcts: list[int] = []
+    anthropic_pool_pcts: list[int] = []
+
     for acc in accounts:
         email = _resolve_account_email(acc)
         is_cooling = any(acc.is_cooling(m) for m in acc.model_cooldowns)
+
+        # Check quota pools if available
+        pools_info: list[dict[str, Any]] | None = None
+        acc_quotas = None
+        if provider_id == "antigravity":
+            acc_quotas = (
+                quotas_by_account.get(acc.id)
+                if quotas_by_account is not None
+                else get_cached_account_quota(acc.id)
+            )
+            if acc_quotas:
+                pools_info = [p.to_dict() for p in acc_quotas.values()]
+                if GEMINI_POOL_ID in acc_quotas:
+                    gemini_pool_pcts.append(acc_quotas[GEMINI_POOL_ID].remaining_pct)
+                if ANTHROPIC_GPT_POOL_ID in acc_quotas:
+                    anthropic_pool_pcts.append(
+                        acc_quotas[ANTHROPIC_GPT_POOL_ID].remaining_pct
+                    )
+
         if acc.is_active() and not is_cooling:
             active_count += 1
-            acc_pct = 100.0
+            if (
+                provider_id == "antigravity"
+                and acc_quotas
+                and ANTHROPIC_GPT_POOL_ID in acc_quotas
+            ):
+                acc_pct = float(acc_quotas[ANTHROPIC_GPT_POOL_ID].remaining_pct)
+            else:
+                acc_pct = 100.0
         elif acc.is_active() and is_cooling:
             cooling_count += 1
             max_rem = max(
@@ -291,38 +375,65 @@ def _serialize_accounts(provider_id: str) -> dict[str, object]:
             acc_pct = 0.0
         acc_pcts.append(acc_pct)
 
-        serialized_accounts.append(
-            {
-                "id": acc.id,
-                "label": email,
-                "raw_label": acc.label,
-                "email": email,
-                "priority": acc.priority,
-                "status": acc.status,
-                "is_cooling": is_cooling,
-                "cooling_models": [
-                    {
-                        "model": m,
-                        "remaining_seconds": round(acc.cooldown_remaining(m), 1),
-                    }
-                    for m in acc.model_cooldowns
-                    if acc.is_cooling(m)
-                ],
-                "remaining_pct": round(acc_pct, 1),
-            }
-        )
+        acc_dict: dict[str, Any] = {
+            "id": acc.id,
+            "label": email,
+            "raw_label": acc.label,
+            "email": email,
+            "priority": acc.priority,
+            "status": acc.status,
+            "is_cooling": is_cooling,
+            "cooling_models": [
+                {
+                    "model": m,
+                    "remaining_seconds": round(acc.cooldown_remaining(m), 1),
+                }
+                for m in acc.model_cooldowns
+                if acc.is_cooling(m)
+            ],
+            "remaining_pct": round(acc_pct, 1),
+        }
+        if pools_info is not None:
+            acc_dict["pools"] = pools_info
+        serialized_accounts.append(acc_dict)
 
     combined_pct = round(sum(acc_pcts) / len(acc_pcts)) if acc_pcts else 0
+
+    limit_summary: dict[str, Any] = {
+        "remaining_pct": combined_pct,
+        "total_accounts": len(accounts),
+        "active_accounts": active_count,
+        "cooling_accounts": cooling_count,
+    }
+
+    if provider_id == "antigravity" and (gemini_pool_pcts or anthropic_pool_pcts):
+        gem_avg = (
+            round(sum(gemini_pool_pcts) / len(gemini_pool_pcts))
+            if gemini_pool_pcts
+            else 100
+        )
+        ant_avg = (
+            round(sum(anthropic_pool_pcts) / len(anthropic_pool_pcts))
+            if anthropic_pool_pcts
+            else 100
+        )
+        limit_summary["pools"] = [
+            {
+                "pool_id": GEMINI_POOL_ID,
+                "name": "Gemini Models",
+                "remaining_pct": gem_avg,
+            },
+            {
+                "pool_id": ANTHROPIC_GPT_POOL_ID,
+                "name": "Anthropic + GPT Models",
+                "remaining_pct": ant_avg,
+            },
+        ]
 
     return {
         "provider_id": provider_id,
         "accounts": serialized_accounts,
-        "limit_summary": {
-            "remaining_pct": combined_pct,
-            "total_accounts": len(accounts),
-            "active_accounts": active_count,
-            "cooling_accounts": cooling_count,
-        },
+        "limit_summary": limit_summary,
     }
 
 
@@ -330,10 +441,18 @@ def _serialize_accounts(provider_id: str) -> dict[str, object]:
 async def list_provider_accounts(
     provider_id: str,
     request: Request,
+    services: ApiServices = Depends(get_services),
 ):
     require_loopback_admin(request)
     _require_connected_account_provider(provider_id)
-    return _no_store(_serialize_accounts(provider_id))
+    quotas = None
+    if provider_id == "antigravity":
+        from free_claude_code.application.account_store import get_account_store
+
+        store = get_account_store()
+        accounts = store.get_accounts(provider_id)
+        quotas = await _fetch_antigravity_quotas_for_accounts(accounts, services)
+    return _no_store(_serialize_accounts(provider_id, quotas_by_account=quotas))
 
 
 @router.post("/admin/api/providers/{provider_id}/accounts/{account_id}/move-up")
@@ -419,23 +538,29 @@ async def oauth_limits(
         except Exception:
             continue
 
-        data = _serialize_accounts(provider_id)
+        quotas = None
+        if provider_id == "antigravity":
+            accounts = store.get_accounts(provider_id)
+            quotas = await _fetch_antigravity_quotas_for_accounts(accounts, services)
+
+        data = _serialize_accounts(provider_id, quotas_by_account=quotas)
         accounts = data.get("accounts", [])
         if not accounts:
             continue
 
         summary = data.get("limit_summary", {})
-        results.append(
-            {
-                "provider_id": provider_id,
-                "display_name": provider_names.get(provider_id, provider_id),
-                "remaining_pct": summary.get("remaining_pct", 100),
-                "total_accounts": summary.get("total_accounts", len(accounts)),
-                "active_accounts": summary.get("active_accounts", len(accounts)),
-                "cooling_accounts": summary.get("cooling_accounts", 0),
-                "accounts": accounts,
-            }
-        )
+        prov_dict: dict[str, Any] = {
+            "provider_id": provider_id,
+            "display_name": provider_names.get(provider_id, provider_id),
+            "remaining_pct": summary.get("remaining_pct", 100),
+            "total_accounts": summary.get("total_accounts", len(accounts)),
+            "active_accounts": summary.get("active_accounts", len(accounts)),
+            "cooling_accounts": summary.get("cooling_accounts", 0),
+            "accounts": accounts,
+        }
+        if "pools" in summary:
+            prov_dict["pools"] = summary["pools"]
+        results.append(prov_dict)
 
     return _no_store({"providers": results})
 

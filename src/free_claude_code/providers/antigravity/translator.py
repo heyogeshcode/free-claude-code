@@ -398,8 +398,8 @@ def _build_contents(
         else:
             merged.append(turn)
 
-    # Gemini requires first turn to be 'user' and last turn to be 'user'
-    if is_gemini and merged:
+    # Antigravity streamGenerateContent API requires first turn to be 'user' and last turn to be 'user'
+    if merged:
         if merged[0]["role"] != "user":
             merged.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
         if merged[-1]["role"] == "model":
@@ -523,9 +523,58 @@ class AntigravityStreamTranslator:
                     self.signature_cache["latest_turn_sig"] = sig
                     self._pending_sig = sig
 
-                # Text delta
+                is_thought = bool(part.get("thought", False))
                 text = part.get("text")
-                if text is not None and len(text) > 0:
+
+                if is_thought:
+                    # Thinking block
+                    if self._current_block_type != "thinking":
+                        if self._current_block_type is not None:
+                            events.append(
+                                format_sse_event(
+                                    "content_block_stop",
+                                    {
+                                        "type": "content_block_stop",
+                                        "index": self._current_block_index,
+                                    },
+                                )
+                            )
+                        self._current_block_index += 1
+                        self._current_block_type = "thinking"
+                        events.append(
+                            format_sse_event(
+                                "content_block_start",
+                                {
+                                    "type": "content_block_start",
+                                    "index": self._current_block_index,
+                                    "content_block": {"type": "thinking", "thinking": ""},
+                                },
+                            )
+                        )
+                    if text:
+                        events.append(
+                            format_sse_event(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": self._current_block_index,
+                                    "delta": {"type": "thinking_delta", "thinking": text},
+                                },
+                            )
+                        )
+                    if sig:
+                        events.append(
+                            format_sse_event(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": self._current_block_index,
+                                    "delta": {"type": "signature_delta", "signature": sig},
+                                },
+                            )
+                        )
+                elif text is not None and len(text) > 0:
+                    # Text delta
                     if self._current_block_type != "text":
                         # Close previous block if open
                         if self._current_block_type is not None:

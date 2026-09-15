@@ -1330,3 +1330,65 @@ textarea:focus-visible,
   font-weight: 600;
   color: var(--text-muted);
 }
+
+.oauth-limit-pools {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0;
+}
+
+.oauth-limit-pool-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.oauth-limit-pool-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+}
+
+.oauth-limit-pool-name {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.account-pools-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.account-pool-badge {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-full, 9999px);
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.account-pool-badge.healthy {
+  background: var(--success-bg, rgba(16, 185, 129, 0.1));
+  border: 1px solid var(--success-border, rgba(16, 185, 129, 0.25));
+  color: var(--success, #10b981);
+}
+
+.account-pool-badge.moderate {
+  background: var(--warning-bg, rgba(245, 158, 11, 0.1));
+  border: 1px solid var(--warning-border, rgba(245, 158, 11, 0.25));
+  color: var(--warning, #f59e0b);
+}
+
+.account-pool-badge.critical {
+  background: var(--error-bg, rgba(239, 68, 68, 0.1));
+  border: 1px solid var(--error-border, rgba(239, 68, 68, 0.25));
+  color: var(--error, #ef4444);
+}
+

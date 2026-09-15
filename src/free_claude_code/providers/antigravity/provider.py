@@ -260,6 +260,8 @@ class AntigravityProvider(BaseProvider):
 
                 # Try primary host first, then secondary
                 response: httpx.Response | None = None
+                saw_404: bool = False
+                last_404_body: str = ""
                 for host in DEFAULT_MODELS_HOSTS:
                     url = f"https://{host}/v1internal:streamGenerateContent?alt=sse"
                     try:
@@ -268,6 +270,9 @@ class AntigravityProvider(BaseProvider):
                         )
                         res = await self._client.send(req, stream=True)
                         if res.status_code == 404:
+                            saw_404 = True
+                            body = await res.aread()
+                            last_404_body = body.decode("utf-8", errors="replace")[:200]
                             await res.aclose()
                             continue
                         response = res
@@ -276,6 +281,13 @@ class AntigravityProvider(BaseProvider):
                         continue
 
                 if response is None:
+                    if saw_404:
+                        raise ExecutionFailure(
+                            FailureKind.UPSTREAM,
+                            404,
+                            f"Model '{request.model}' (backend '{_backend_model}') not found on Antigravity: {last_404_body}",
+                            False,
+                        )
                     raise ExecutionFailure(
                         FailureKind.UPSTREAM,
                         503,
@@ -292,6 +304,14 @@ class AntigravityProvider(BaseProvider):
                     continue
 
                 if response.status_code == 429:
+                    if saw_404:
+                        await response.aclose()
+                        raise ExecutionFailure(
+                            FailureKind.UPSTREAM,
+                            404,
+                            f"Model '{request.model}' (backend '{_backend_model}') not found on Antigravity: {last_404_body}",
+                            False,
+                        )
                     detail = await response.aread()
                     await response.aclose()
                     raise ExecutionFailure(

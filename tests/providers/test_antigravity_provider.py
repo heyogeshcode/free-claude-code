@@ -379,3 +379,58 @@ async def test_codex_stream_responses_sanitization(provider_config):
     finally:
         await provider.cleanup()
         await client.aclose()
+
+
+def test_resolve_backend_model_aliases():
+    from free_claude_code.providers.antigravity.models import resolve_backend_model
+
+    assert resolve_backend_model("opus-4.6") == "claude-opus-4-6-thinking"
+    assert resolve_backend_model("sonnet-4.6") == "claude-sonnet-4-6"
+    assert resolve_backend_model("antigravity/opus-4.6") == "claude-opus-4-6-thinking"
+    assert resolve_backend_model("antigravity/sonnet-4.6") == "claude-sonnet-4-6"
+    assert resolve_backend_model("claude-opus-4.6") == "claude-opus-4-6-thinking"
+    assert resolve_backend_model("claude-sonnet-4.6") == "claude-sonnet-4-6"
+    assert resolve_backend_model("claude-3-7-sonnet-latest") == "claude-sonnet-4-6"
+    assert resolve_backend_model("claude-3-5-sonnet") == "claude-sonnet-4-6"
+    assert resolve_backend_model("claude-3-opus") == "claude-opus-4-6-thinking"
+    assert resolve_backend_model("haiku") == "gemini-2.5-flash"
+    assert resolve_backend_model("gemini-3.8-flash") == "gemini-3.8-flash-tiered"
+
+
+def test_stream_translator_thinking_blocks():
+    import json
+    from free_claude_code.providers.antigravity.translator import AntigravityStreamTranslator
+
+    cache = {}
+    translator = AntigravityStreamTranslator(
+        public_model="opus-4.6",
+        signature_cache=cache,
+        input_tokens=10,
+    )
+
+    # 1. Thought chunk with thought: True and text
+    line1 = 'data: {"response": {"candidates": [{"content": {"parts": [{"thought": true, "text": "Let me think...", "thoughtSignature": "sig123"}]}}]}}\n'
+    events1 = translator.process_line(line1)
+    joined1 = "".join(events1)
+    assert "message_start" in joined1
+    assert "content_block_start" in joined1
+    assert '"type": "thinking"' in joined1
+    assert "thinking_delta" in joined1
+    assert "signature_delta" in joined1
+    assert cache.get("latest_turn_sig") == "sig123"
+
+    # 2. Transition from thought to final text
+    line2 = 'data: {"response": {"candidates": [{"content": {"parts": [{"text": "Hello world!"}]}}]}}\n'
+    events2 = translator.process_line(line2)
+    joined2 = "".join(events2)
+    assert "content_block_stop" in joined2
+    assert '"type": "text"' in joined2
+    assert "text_delta" in joined2
+
+    # 3. Finalize
+    events3 = translator.finalize()
+    joined3 = "".join(events3)
+    assert "content_block_stop" in joined3
+    assert "message_delta" in joined3
+    assert "message_stop" in joined3
+

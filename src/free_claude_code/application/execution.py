@@ -384,7 +384,15 @@ class ProviderExecutor:
         async def provider_body() -> AsyncIterator[str]:
             loop = asyncio.get_running_loop()
             progress_deadline = loop.time() + self._progress_timeout_seconds
+            skip_model_target: tuple[str, str] | None = None
+            last_failure: ExecutionFailure | None = None
             for index, target in enumerate(candidates):
+                if (
+                    skip_model_target is not None
+                    and (target.provider_id, target.provider_model) == skip_model_target
+                ):
+                    continue
+                skip_model_target = None
                 provider_stream: AsyncIterator[str] | None = None
                 candidate_committed = False
                 candidate_failure: ExecutionFailure | None = None
@@ -502,11 +510,30 @@ class ProviderExecutor:
                         if inspect.isawaitable(selected_result):
                             await selected_result
                     return
+                last_failure = candidate_failure
                 if candidate_failed is not None:
                     candidate_failed(candidate_failure)
                 if candidate_committed or index + 1 >= len(candidates):
                     raise candidate_failure
-                next_target = candidates[index + 1]
+
+                if (
+                    candidate_failure.status_code in (400, 404)
+                    and not candidate_failure.retryable
+                ):
+                    skip_model_target = (target.provider_id, target.provider_model)
+                    next_target = next(
+                        (
+                            c
+                            for c in candidates[index + 1 :]
+                            if (c.provider_id, c.provider_model) != skip_model_target
+                        ),
+                        None,
+                    )
+                    if next_target is None:
+                        raise candidate_failure
+                else:
+                    next_target = candidates[index + 1]
+
                 self._trace_fallback_started(
                     request_id=request_id,
                     wire_api=wire_api,
@@ -516,6 +543,9 @@ class ProviderExecutor:
                     candidate_index=index + 2,
                     candidate_count=len(candidates),
                 )
+
+            if last_failure is not None:
+                raise last_failure
 
         stream_trace: dict[str, object] = {
             "request_id": request_id,

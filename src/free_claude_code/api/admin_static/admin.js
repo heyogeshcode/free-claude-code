@@ -421,6 +421,23 @@ function renderAccountsList(providerId, accounts, container) {
       subLine.append(dot, statusText);
     }
 
+    if (Array.isArray(acc.pools) && acc.pools.length > 0) {
+      const poolsWrap = document.createElement("span");
+      poolsWrap.className = "account-pools-wrap";
+      acc.pools.forEach((p) => {
+        if (!p) return;
+        const poolPct = Math.max(0, Math.min(100, Math.round(p.remaining_pct ?? 100)));
+        const poolHealth = poolPct >= 70 ? "healthy" : poolPct >= 30 ? "moderate" : "critical";
+        const shortName = p.pool_id === "gemini" ? "Gemini" : "Claude/GPT";
+        const badge = document.createElement("span");
+        badge.className = `account-pool-badge ${poolHealth}`;
+        badge.textContent = `${shortName}: ${poolPct}%`;
+        badge.title = `${p.name || p.pool_id}: ${poolPct}% remaining`;
+        poolsWrap.appendChild(badge);
+      });
+      subLine.appendChild(poolsWrap);
+    }
+
     content.append(primaryLine, subLine);
 
     // Right side: Compact action controls (Move Up, Move Down, Delete)
@@ -600,8 +617,7 @@ async function refreshOAuthLimits() {
       const card = document.createElement("div");
       card.className = "oauth-limit-card";
 
-      const pct = Math.max(0, Math.min(100, Math.round(prov.remaining_pct ?? 100)));
-      const healthClass = pct >= 70 ? "healthy" : pct >= 30 ? "moderate" : "critical";
+      const hasPools = Array.isArray(prov.pools) && prov.pools.length > 0;
 
       const topRow = document.createElement("div");
       topRow.className = "oauth-limit-top";
@@ -616,25 +632,76 @@ async function refreshOAuthLimits() {
       countPill.className = "oauth-limit-count-pill";
       countPill.textContent = `${prov.total_accounts} account${prov.total_accounts === 1 ? "" : "s"}`;
       nameWrap.append(name, countPill);
+      topRow.appendChild(nameWrap);
 
-      const pctBadge = document.createElement("span");
-      pctBadge.className = `oauth-limit-pct-badge ${healthClass}`;
-      pctBadge.textContent = `${pct}% Remaining`;
+      if (!hasPools) {
+        const pct = Math.max(0, Math.min(100, Math.round(prov.remaining_pct ?? 100)));
+        const healthClass = pct >= 70 ? "healthy" : pct >= 30 ? "moderate" : "critical";
 
-      topRow.append(nameWrap, pctBadge);
+        const pctBadge = document.createElement("span");
+        pctBadge.className = `oauth-limit-pct-badge ${healthClass}`;
+        pctBadge.textContent = `${pct}% Remaining`;
+        topRow.appendChild(pctBadge);
 
-      const track = document.createElement("div");
-      track.className = "oauth-limit-bar-track";
-      track.setAttribute("role", "progressbar");
-      track.setAttribute("aria-valuenow", pct);
-      track.setAttribute("aria-valuemin", 0);
-      track.setAttribute("aria-valuemax", 100);
-      track.setAttribute("aria-label", `${prov.display_name} combined limit`);
+        const track = document.createElement("div");
+        track.className = "oauth-limit-bar-track";
+        track.setAttribute("role", "progressbar");
+        track.setAttribute("aria-valuenow", pct);
+        track.setAttribute("aria-valuemin", 0);
+        track.setAttribute("aria-valuemax", 100);
+        track.setAttribute("aria-label", `${prov.display_name} combined limit`);
 
-      const fill = document.createElement("div");
-      fill.className = `oauth-limit-bar-fill ${healthClass}`;
-      fill.style.width = `${pct}%`;
-      track.appendChild(fill);
+        const fill = document.createElement("div");
+        fill.className = `oauth-limit-bar-fill ${healthClass}`;
+        fill.style.width = `${pct}%`;
+        track.appendChild(fill);
+
+        card.append(topRow, track);
+      } else {
+        card.appendChild(topRow);
+
+        const poolsContainer = document.createElement("div");
+        poolsContainer.className = "oauth-limit-pools";
+
+        prov.pools.forEach((pool) => {
+          const poolPct = Math.max(0, Math.min(100, Math.round(pool.remaining_pct ?? 100)));
+          const poolHealth = poolPct >= 70 ? "healthy" : poolPct >= 30 ? "moderate" : "critical";
+
+          const poolRow = document.createElement("div");
+          poolRow.className = "oauth-limit-pool-row";
+
+          const poolHeader = document.createElement("div");
+          poolHeader.className = "oauth-limit-pool-header";
+
+          const poolName = document.createElement("span");
+          poolName.className = "oauth-limit-pool-name";
+          poolName.textContent = pool.name || pool.pool_id;
+
+          const poolBadge = document.createElement("span");
+          poolBadge.className = `oauth-limit-pct-badge ${poolHealth}`;
+          poolBadge.textContent = `${poolPct}% Available`;
+
+          poolHeader.append(poolName, poolBadge);
+
+          const track = document.createElement("div");
+          track.className = "oauth-limit-bar-track";
+          track.setAttribute("role", "progressbar");
+          track.setAttribute("aria-valuenow", poolPct);
+          track.setAttribute("aria-valuemin", 0);
+          track.setAttribute("aria-valuemax", 100);
+          track.setAttribute("aria-label", `${prov.display_name} ${pool.name} limit`);
+
+          const fill = document.createElement("div");
+          fill.className = `oauth-limit-bar-fill ${poolHealth}`;
+          fill.style.width = `${poolPct}%`;
+          track.appendChild(fill);
+
+          poolRow.append(poolHeader, track);
+          poolsContainer.appendChild(poolRow);
+        });
+
+        card.appendChild(poolsContainer);
+      }
 
       const metaRow = document.createElement("div");
       metaRow.className = "oauth-limit-meta";
@@ -649,11 +716,16 @@ async function refreshOAuthLimits() {
 
       const capacityText = document.createElement("span");
       capacityText.className = "oauth-limit-capacity-hint";
-      capacityText.textContent = pct === 100 ? "Full Pool Capacity" : `${pct}% Available`;
+      if (hasPools) {
+        capacityText.textContent = "Separate Gemini & Claude/GPT Pools";
+      } else {
+        const pct = Math.max(0, Math.min(100, Math.round(prov.remaining_pct ?? 100)));
+        capacityText.textContent = pct === 100 ? "Full Pool Capacity" : `${pct}% Available`;
+      }
 
       metaRow.append(statusText, capacityText);
 
-      card.append(topRow, track, metaRow);
+      card.appendChild(metaRow);
       grid.appendChild(card);
     });
 

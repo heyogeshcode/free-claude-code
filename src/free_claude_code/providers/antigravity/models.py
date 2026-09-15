@@ -28,10 +28,20 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-sonnet-4-6": "claude-sonnet-4-6",
     "claude-sonnet-4.6": "claude-sonnet-4-6",
     "claude-sonnet": "claude-sonnet-4-6",
+    "sonnet-4.6": "claude-sonnet-4-6",
+    "sonnet-4-6": "claude-sonnet-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "claude-sonnet-4-5": "claude-sonnet-4-6",
+    "claude-sonnet-4.5": "claude-sonnet-4-6",
+    "sonnet-4-5": "claude-sonnet-4-6",
+    "sonnet-4.5": "claude-sonnet-4-6",
     "claude-opus-4-6-thinking": "claude-opus-4-6-thinking",
     "claude-opus-4-6": "claude-opus-4-6-thinking",
     "claude-opus-4.6": "claude-opus-4-6-thinking",
     "claude-opus": "claude-opus-4-6-thinking",
+    "opus-4.6": "claude-opus-4-6-thinking",
+    "opus-4-6": "claude-opus-4-6-thinking",
+    "opus": "claude-opus-4-6-thinking",
     # Other models
     "gpt-oss-120b-medium": "gpt-oss-120b-medium",
     # Claude 3.7 / 3.5 / 3 aliases (Claude Code CLI and Codex)
@@ -50,6 +60,8 @@ MODEL_ALIASES: dict[str, str] = {
     "claude-3-5-haiku-20241022": "gemini-2.5-flash",
     "claude-3-haiku": "gemini-2.5-flash",
     "claude-3-haiku-20240307": "gemini-2.5-flash",
+    "claude-haiku": "gemini-2.5-flash",
+    "haiku": "gemini-2.5-flash",
     # OpenAI model aliases (Codex)
     "gpt-4o": "gemini-3.8-flash-tiered",
     "gpt-4o-mini": "gemini-2.5-flash",
@@ -131,6 +143,34 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[ProviderModelInfo, ...] = (
         max_output_tokens=65_536,
     ),
     ProviderModelInfo(
+        model_id="opus-4.6",
+        supports_thinking=True,
+        input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
+        context_window_tokens=200_000,
+        max_output_tokens=65_536,
+    ),
+    ProviderModelInfo(
+        model_id="sonnet-4.6",
+        supports_thinking=True,
+        input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
+        context_window_tokens=200_000,
+        max_output_tokens=65_536,
+    ),
+    ProviderModelInfo(
+        model_id="claude-opus-4.6",
+        supports_thinking=True,
+        input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
+        context_window_tokens=200_000,
+        max_output_tokens=65_536,
+    ),
+    ProviderModelInfo(
+        model_id="claude-sonnet-4.6",
+        supports_thinking=True,
+        input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
+        context_window_tokens=200_000,
+        max_output_tokens=65_536,
+    ),
+    ProviderModelInfo(
         model_id="gpt-oss-120b-medium",
         supports_thinking=False,
         input_modalities=frozenset({ModelInputModality.TEXT}),
@@ -150,16 +190,34 @@ def resolve_backend_model(model_name: str) -> str:
         suffix = clean[len("claude-google-") :]
         clean = suffix if suffix.startswith("gemini-") else f"gemini-{suffix}"
 
+    lower_clean = clean.lower()
+
     # Check explicit alias table
     if clean in MODEL_ALIASES:
         return MODEL_ALIASES[clean]
+    if lower_clean in MODEL_ALIASES:
+        return MODEL_ALIASES[lower_clean]
 
-    # Prefix matches for Claude models
-    if clean.startswith("claude-3-7-sonnet") or clean.startswith("claude-3-5-sonnet") or clean.startswith("claude-sonnet"):
-        return "claude-sonnet-4-6"
-    if clean.startswith("claude-3-opus") or clean.startswith("claude-opus"):
+    # Prefix matches for Claude / Opus / Sonnet / Haiku models
+    if (
+        lower_clean.startswith("opus")
+        or lower_clean.startswith("claude-opus")
+        or lower_clean.startswith("claude-3-opus")
+    ):
         return "claude-opus-4-6-thinking"
-    if clean.startswith("claude-3-5-haiku") or clean.startswith("claude-3-haiku") or clean.startswith("claude-haiku"):
+    if (
+        lower_clean.startswith("sonnet")
+        or lower_clean.startswith("claude-sonnet")
+        or lower_clean.startswith("claude-3-7-sonnet")
+        or lower_clean.startswith("claude-3-5-sonnet")
+    ):
+        return "claude-sonnet-4-6"
+    if (
+        lower_clean.startswith("haiku")
+        or lower_clean.startswith("claude-haiku")
+        or lower_clean.startswith("claude-3-5-haiku")
+        or lower_clean.startswith("claude-3-haiku")
+    ):
         return "gemini-2.5-flash"
 
     # If user provided a name ending in clean alias (e.g. gemini-3.8-flash), check if -tiered exists
