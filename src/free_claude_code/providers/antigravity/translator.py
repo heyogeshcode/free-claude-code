@@ -56,24 +56,134 @@ def translate_messages_request(
     )
     if not contents:
         # Fallback empty turn
-        contents = [{"role": "user", "parts": [{"text": ""}]}]
+        contents = [{"role": "user", "parts": [{"text": " "}]}]
     req_payload["contents"] = contents
 
     # Generation config
     gen_config: dict[str, Any] = {}
-    if request.max_tokens:
-        gen_config["maxOutputTokens"] = request.max_tokens
     if request.temperature is not None:
         gen_config["temperature"] = request.temperature
+    if request.stop_sequences:
+        gen_config["stopSequences"] = list(request.stop_sequences)
+    if request.top_p is not None:
+        gen_config["topP"] = request.top_p
+    if request.top_k is not None:
+        gen_config["topK"] = request.top_k
 
-    thinking = getattr(request, "thinking", None)
-    if isinstance(thinking, dict) and thinking.get("type") == "enabled":
-        budget = thinking.get("budget_tokens")
-        if isinstance(budget, int) and budget > 0:
-            gen_config["thinkingConfig"] = {"thinkingBudget": budget}
+    # Resolve thinking and budget from both Pydantic ThinkingConfig and dict representations
+    thinking = request.thinking
+    thinking_enabled = False
+    budget: int | None = None
+
+    if thinking is not None:
+        if isinstance(thinking, dict):
+            ttype = thinking.get("type")
+            tenabled = thinking.get("enabled")
+            tbudget = thinking.get("budget_tokens")
+        else:
+            ttype = getattr(thinking, "type", None)
+            tenabled = getattr(thinking, "enabled", None)
+            tbudget = getattr(thinking, "budget_tokens", None)
+
+        if isinstance(tbudget, int) and not isinstance(tbudget, bool) and tbudget > 0:
+            budget = tbudget
+
+        if ttype == "disabled" or tenabled is False:
+            thinking_enabled = False
+        elif (
+            ttype in ("enabled", "adaptive")
+            or tenabled is True
+            or (budget is not None)
+        ):
+            thinking_enabled = True
+
+    if thinking_enabled:
+        default_budget = min(32_768, request.max_tokens) if request.max_tokens else 32_768
+        effective_budget = budget if budget is not None else default_budget
+        gen_config["thinkingConfig"] = {"thinkingBudget": effective_budget}
+
+        if backend_model.startswith("gemini"):
+            # Gemini budget splitting: maxOutputTokens represents response output capacity
+            if request.max_tokens:
+                if request.max_tokens > effective_budget:
+                    gen_config["maxOutputTokens"] = max(1024, request.max_tokens - effective_budget)
+                else:
+                    gen_config["maxOutputTokens"] = max(1024, request.max_tokens)
+        else:
+            # Claude models on Antigravity: forward max_tokens natively
+            if request.max_tokens:
+                gen_config["maxOutputTokens"] = request.max_tokens
+    elif request.max_tokens:
+        gen_config["maxOutputTokens"] = request.max_tokens
+
+    # Response format / JSON mode
+    rf = getattr(request, "response_format", None)
+    if not rf and hasattr(request, "extra_body") and isinstance(request.extra_body, dict):
+        rf = request.extra_body.get("response_format")
+    if not rf and hasattr(request, "output_config") and isinstance(request.output_config, dict):
+        rf = request.output_config.get("format")
+
+    if rf:
+        rf_type = rf.get("type") if isinstance(rf, dict) else getattr(rf, "type", None)
+        if rf_type == "json_object":
+            gen_config["responseMimeType"] = "application/json"
+        elif rf_type == "json_schema":
+            gen_config["responseMimeType"] = "application/json"
+            schema = None
+            if isinstance(rf, dict):
+                js = rf.get("json_schema", {})
+                schema = js.get("schema", {}) if isinstance(js, dict) else getattr(js, "schema", {})
+            else:
+                js = getattr(rf, "json_schema", None)
+                schema = js.get("schema", {}) if isinstance(js, dict) else getattr(js, "schema", {})
+            if schema and isinstance(schema, dict):
+                gen_config["responseSchema"] = _sanitize_schema(schema)
+
+    # After building gen_config, apply model defaults for missing params
+    from .models import MODEL_GENERATION_DEFAULTS
+    model_defaults = MODEL_GENERATION_DEFAULTS.get(backend_model)
+    if model_defaults is None and backend_model.startswith("gemini"):
+        model_defaults = {"temperature": 1.0, "topP": 0.95, "topK": 64}
+    elif model_defaults is None:
+        model_defaults = {}
+    for key, default_value in model_defaults.items():
+        if key not in gen_config:
+            gen_config[key] = default_value
 
     if gen_config:
         req_payload["generationConfig"] = gen_config
+
+    tool_choice = request.tool_choice
+    if tool_choice:
+        choice_type = None
+        tool_name = None
+        if isinstance(tool_choice, str):
+            choice_type = tool_choice
+        elif isinstance(tool_choice, dict):
+            choice_type = tool_choice.get("type")
+            tool_name = tool_choice.get("name")
+        else:
+            choice_type = getattr(tool_choice, "type", None)
+            tool_name = getattr(tool_choice, "name", None)
+
+        if choice_type == "auto":
+            req_payload["toolConfig"] = {"functionCallingConfig": {"mode": "AUTO"}}
+        elif choice_type in ("any", "required"):
+            req_payload["toolConfig"] = {"functionCallingConfig": {"mode": "ANY"}}
+        elif choice_type == "none":
+            req_payload["toolConfig"] = {"functionCallingConfig": {"mode": "NONE"}}
+        elif choice_type == "tool" and tool_name:
+            req_payload["toolConfig"] = {
+                "functionCallingConfig": {"mode": "ANY", "allowedFunctionNames": [tool_name]}
+            }
+
+    req_payload["safetySettings"] = [
+        {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
+        {"category": "HARM_CATEGORY_CIVIC_INTEGRITY", "threshold": "BLOCK_NONE"},
+    ]
 
     full_payload = {
         "project": project_id,
@@ -83,21 +193,131 @@ def translate_messages_request(
     return full_payload, backend_model
 
 
+def is_known_harness_system_prompt(system_text: str) -> bool:
+    """Detect if the system prompt originates from Claude Code or Antigravity harnesses.
+
+    Harnesses rely on exact XML framing, capabilities declarations, and tool use rules.
+    Detecting these ensures we never inject interfering synthetic prompts or alter structure.
+    """
+    if not system_text:
+        return False
+    lower = system_text.lower()
+    return (
+        "<claude_info>" in lower
+        or "claude code" in lower
+        or "<antigravity_instructions>" in lower
+        or "<policy_spec>" in lower
+        or "you are an agentic coding assistant" in lower
+        or "<context>" in lower
+        or "<instructions>" in lower
+    )
+
+
+def _join_system_blocks(blocks: list[str]) -> str:
+    """Join multiple system prompt text blocks while preserving exact structure, tags, and formatting."""
+    if not blocks:
+        return ""
+    if len(blocks) == 1:
+        return blocks[0]
+
+    result: list[str] = []
+    for b in blocks:
+        if not b:
+            continue
+        if not result:
+            result.append(b)
+            continue
+
+        prev = result[-1]
+        prev_stripped = prev.rstrip("\r\n")
+        curr_stripped = b.lstrip("\r\n")
+
+        prev_trailing_newlines = len(prev) - len(prev_stripped)
+        curr_leading_newlines = len(b) - len(curr_stripped)
+        existing_newlines = prev_trailing_newlines + curr_leading_newlines
+
+        is_xml_boundary = prev_stripped.endswith(">") and (
+            curr_stripped.startswith("<") or curr_stripped.startswith("</")
+        )
+
+        if existing_newlines >= 2:
+            result[-1] = prev_stripped + "\n\n"
+            result.append(curr_stripped)
+        elif existing_newlines == 1:
+            if is_xml_boundary:
+                result[-1] = prev_stripped + "\n"
+                result.append(curr_stripped)
+            else:
+                result[-1] = prev_stripped + "\n\n"
+                result.append(curr_stripped)
+        else:
+            if is_xml_boundary:
+                result[-1] = prev_stripped + "\n"
+                result.append(curr_stripped)
+            else:
+                result[-1] = prev_stripped + "\n\n"
+                result.append(curr_stripped)
+
+    return "".join(result)
+
+
+def extract_system_cache_control(system: Any) -> list[dict[str, Any]]:
+    """Extract cache_control annotations from system prompt blocks if present."""
+    if not isinstance(system, list):
+        return []
+    markers: list[dict[str, Any]] = []
+    for block in system:
+        if isinstance(block, dict):
+            cc = block.get("cache_control")
+            if isinstance(cc, dict):
+                markers.append(cc)
+        else:
+            cc = getattr(block, "cache_control", None)
+            if isinstance(cc, dict):
+                markers.append(cc)
+    return markers
+
+
 def _extract_system_text(system: Any) -> str:
+    """Extract system text while preserving 100% structural fidelity, XML hierarchy, and markdown formatting."""
     if not system:
         return ""
     if isinstance(system, str):
         return system
+
     if isinstance(system, list):
-        parts: list[str] = []
+        blocks_text: list[str] = []
         for block in system:
             if isinstance(block, str):
-                parts.append(block)
-            elif isinstance(block, dict) and "text" in block:
-                parts.append(str(block["text"]))
-            elif hasattr(block, "text"):
-                parts.append(str(block.text))
-        return "\n\n".join(parts)
+                if block:
+                    blocks_text.append(block)
+            elif isinstance(block, dict):
+                btype = block.get("type")
+                if btype == "text" or not btype:
+                    text_val = block.get("text")
+                    if text_val is None and "content" in block:
+                        text_val = block.get("content")
+                    if text_val is not None:
+                        blocks_text.append(str(text_val))
+                elif btype in ("citation", "reference"):
+                    cit_text = block.get("text") or block.get("content") or ""
+                    if cit_text:
+                        blocks_text.append(str(cit_text))
+            else:
+                btype = getattr(block, "type", None)
+                if btype == "text" or not btype:
+                    text_val = getattr(block, "text", None)
+                    if text_val is None and hasattr(block, "content"):
+                        text_val = getattr(block, "content", None)
+                    if text_val is not None:
+                        blocks_text.append(str(text_val))
+                elif btype in ("citation", "reference"):
+                    cit_text = getattr(block, "text", None) or getattr(block, "content", None) or ""
+                    if cit_text:
+                        blocks_text.append(str(cit_text))
+
+        return _join_system_blocks(blocks_text)
+
     return ""
 
 
@@ -116,16 +336,43 @@ _GEMINI_ALLOWED_SCHEMA_FIELDS = {
 }
 
 
-def _sanitize_schema(schema: Any) -> dict[str, Any]:
+def _sanitize_schema(schema: Any, root_schema: dict[str, Any] | None = None) -> dict[str, Any]:
     """Sanitize JSON schema to strictly conform to Google Gemini Schema protobuf.
 
-    Strips unsupported fields such as $schema, additionalProperties, title, $defs,
-    definitions, propertyNames, patternProperties, default, etc., and normalizes types.
+    Strips unsupported fields such as $schema, $defs,
+    definitions, propertyNames, patternProperties, etc., and normalizes types.
+    Preserves semantically vital fields: additionalProperties, const, default,
+    description, and all required properties.
     """
     if not isinstance(schema, dict):
         return {"type": "OBJECT", "properties": {}}
 
     raw = dict(schema)
+    if root_schema is None:
+        root_schema = raw
+
+    # Handle $ref by inlining
+    if "$ref" in raw and isinstance(raw["$ref"], str) and root_schema:
+        ref_path = raw["$ref"]
+        curr = root_schema
+        if ref_path.startswith("#/"):
+            parts = ref_path[2:].split("/")
+            for part in parts:
+                if isinstance(curr, dict) and part in curr:
+                    curr = curr[part]
+                else:
+                    curr = None
+                    break
+        elif ref_path in root_schema.get("$defs", {}):
+            curr = root_schema["$defs"][ref_path]
+        elif ref_path in root_schema.get("definitions", {}):
+            curr = root_schema["definitions"][ref_path]
+        else:
+            curr = None
+
+        if isinstance(curr, dict):
+            return _sanitize_schema(curr, root_schema)
+
     result: dict[str, Any] = {}
 
     # Simplify anyOf / oneOf / allOf if type is not directly present
@@ -134,6 +381,11 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
         if combiner in raw and isinstance(raw[combiner], list):
             for variant in raw[combiner]:
                 if isinstance(variant, dict):
+                    if "$ref" in variant and isinstance(variant["$ref"], str) and root_schema:
+                        resolved_var = _sanitize_schema(variant, root_schema)
+                        if isinstance(resolved_var, dict):
+                            variant = resolved_var
+
                     vtype = variant.get("type")
                     if vtype == "null" or (isinstance(vtype, list) and "null" in vtype):
                         nullable = True
@@ -168,6 +420,16 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
         result["type"] = "ARRAY"
     elif "enum" in raw:
         result["type"] = "STRING"
+    elif "const" in raw and raw["const"] is not None:
+        const_val = raw["const"]
+        if isinstance(const_val, bool):
+            result["type"] = "BOOLEAN"
+        elif isinstance(const_val, int):
+            result["type"] = "INTEGER"
+        elif isinstance(const_val, float):
+            result["type"] = "NUMBER"
+        else:
+            result["type"] = "STRING"
     else:
         result["type"] = "OBJECT"
 
@@ -176,6 +438,18 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
 
     if "description" in raw and raw["description"] is not None:
         result["description"] = str(raw["description"])
+    elif "title" in raw and raw["title"] is not None:
+        result["description"] = str(raw["title"])
+
+    if "default" in raw and raw["default"] is not None:
+        default_str = f"Default: {raw['default']}"
+        if "description" in result:
+            result["description"] = f"{result['description']}\n{default_str}"
+        else:
+            result["description"] = default_str
+
+    if "const" in raw and raw["const"] is not None:
+        result["enum"] = [str(raw["const"])]
 
     if "format" in raw and isinstance(raw["format"], str):
         result["format"] = raw["format"]
@@ -189,38 +463,47 @@ def _sanitize_schema(schema: Any) -> dict[str, Any]:
     if "minItems" in raw and isinstance(raw["minItems"], int):
         result["minItems"] = raw["minItems"]
 
+    if "additionalProperties" in raw and isinstance(raw["additionalProperties"], bool):
+        result["additionalProperties"] = raw["additionalProperties"]
+
     # Properties
+    sanitized_props: dict[str, Any] = {}
     if "properties" in raw and isinstance(raw["properties"], dict):
-        sanitized_props: dict[str, Any] = {}
         for prop_name, prop_def in raw["properties"].items():
             if isinstance(prop_name, str):
-                sanitized_props[prop_name] = _sanitize_schema(prop_def)
-        result["properties"] = sanitized_props
+                sanitized_props[prop_name] = _sanitize_schema(prop_def, root_schema)
 
-    # Required: Gemini requires all listed required fields to be declared in properties
+    # Required: Gemini requires all listed required fields to be declared in properties.
+    # If a field is in required but missing from properties, inject a generic string definition
+    # so Gemini's protobuf accepts it without stripping the required semantic constraint.
     if "required" in raw and isinstance(raw["required"], list):
-        props = result.get("properties")
-        if isinstance(props, dict):
-            reqs = [
-                str(k)
-                for k in raw["required"]
-                if isinstance(k, str) and k in props
-            ]
-        else:
-            reqs = [str(k) for k in raw["required"] if isinstance(k, str)]
-        if reqs:
-            result["required"] = reqs
+        req_list: list[str] = []
+        for k in raw["required"]:
+            if isinstance(k, str):
+                prop_key = str(k)
+                req_list.append(prop_key)
+                if prop_key not in sanitized_props:
+                    sanitized_props[prop_key] = {
+                        "type": "STRING",
+                        "description": f"Required parameter `{prop_key}`",
+                    }
+        if req_list:
+            result["required"] = req_list
+
+    if sanitized_props:
+        result["properties"] = sanitized_props
 
     # Items for ARRAY schemas
     if "items" in raw:
         if isinstance(raw["items"], dict):
-            result["items"] = _sanitize_schema(raw["items"])
+            result["items"] = _sanitize_schema(raw["items"], root_schema)
         elif isinstance(raw["items"], list) and raw["items"]:
-            result["items"] = _sanitize_schema(raw["items"][0])
+            result["items"] = _sanitize_schema(raw["items"][0], root_schema)
     elif result.get("type") == "ARRAY":
         result["items"] = {"type": "STRING"}
 
     return result
+
 
 
 def _build_contents(
@@ -284,7 +567,21 @@ def _build_contents(
                     )
                     if text_val:
                         parts.append({"text": text_val})
-                elif btype == "image":
+                elif btype == "thinking":
+                    thinking_val = getattr(block, "thinking", None) or (
+                        block.get("thinking") if isinstance(block, dict) else ""
+                    )
+                    sig = getattr(block, "signature", None) or (
+                        block.get("signature") if isinstance(block, dict) else ""
+                    )
+                    if sig:
+                        signature_cache["latest_turn_sig"] = sig
+                    if thinking_val:
+                        thought_part: dict[str, Any] = {"text": thinking_val, "thought": True}
+                        if sig:
+                            thought_part["thoughtSignature"] = sig
+                        parts.append(thought_part)
+                elif btype in ("image", "document"):
                     source = getattr(block, "source", None) or (
                         block.get("source") if isinstance(block, dict) else {}
                     )
@@ -293,16 +590,17 @@ def _build_contents(
                         if isinstance(source, dict)
                         else getattr(source, "data", None)
                     )
+                    default_mime = "application/pdf" if btype == "document" else "image/jpeg"
                     media_type = (
                         source.get("media_type")
                         if isinstance(source, dict)
-                        else getattr(source, "media_type", "image/jpeg")
+                        else getattr(source, "media_type", default_mime)
                     )
                     if data_val:
                         parts.append(
                             {
                                 "inlineData": {
-                                    "mimeType": media_type or "image/jpeg",
+                                    "mimeType": media_type or default_mime,
                                     "data": data_val,
                                 }
                             }
@@ -326,26 +624,16 @@ def _build_contents(
                         or signature_cache.get(tool_id)
                     )
 
-                    # Gemini models strictly require thoughtSignature on functionCall parts.
-                    # Missing signatures cause 400 Bad Request, and mismatched signatures
-                    # cause 400 Corrupted thought signature. If no genuine signature is
-                    # available, fallback to a clean text representation.
-                    if is_gemini and not sig:
-                        inp_str = json.dumps(tool_input) if tool_input else "{}"
-                        parts.append(
-                            {"text": f"Calling tool `{tool_name}` with arguments: {inp_str}"}
-                        )
-                    else:
-                        part: dict[str, Any] = {
-                            "functionCall": {
-                                "name": tool_name,
-                                "args": tool_input,
-                                "id": tool_id,
-                            }
+                    part: dict[str, Any] = {
+                        "functionCall": {
+                            "name": tool_name,
+                            "args": tool_input,
+                            "id": tool_id,
                         }
-                        if sig:
-                            part["thoughtSignature"] = sig
-                        parts.append(part)
+                    }
+                    if sig:
+                        part["thoughtSignature"] = sig
+                    parts.append(part)
                 elif btype == "tool_result":
                     tool_use_id = getattr(block, "tool_use_id", None) or (
                         block.get("tool_use_id") if isinstance(block, dict) else ""
@@ -353,40 +641,73 @@ def _build_contents(
                     result_content = getattr(block, "content", None) or (
                         block.get("content") if isinstance(block, dict) else ""
                     )
+                    is_error = getattr(block, "is_error", False) or (
+                        block.get("is_error") if isinstance(block, dict) else False
+                    )
+
+                    text_items: list[str] = []
+                    media_parts: list[dict[str, Any]] = []
+
                     if isinstance(result_content, list):
-                        # Combine text parts
-                        text_items = [
-                            c.get("text", "")
-                            if isinstance(c, dict)
-                            else getattr(c, "text", "")
-                            for c in result_content
-                        ]
+                        for c in result_content:
+                            c_type = getattr(c, "type", None) or (
+                                c.get("type") if isinstance(c, dict) else ""
+                            )
+                            if c_type == "text" or not c_type:
+                                t = getattr(c, "text", None) or (
+                                    c.get("text") if isinstance(c, dict) else ""
+                                )
+                                if t:
+                                    text_items.append(str(t))
+                            elif c_type in ("image", "document"):
+                                src = getattr(c, "source", None) or (
+                                    c.get("source") if isinstance(c, dict) else {}
+                                )
+                                d = (
+                                    src.get("data")
+                                    if isinstance(src, dict)
+                                    else getattr(src, "data", None)
+                                )
+                                m = (
+                                    src.get("media_type")
+                                    if isinstance(src, dict)
+                                    else getattr(src, "media_type", None)
+                                )
+                                if not m:
+                                    m = "application/pdf" if c_type == "document" else "image/jpeg"
+                                if d:
+                                    media_parts.append(
+                                        {
+                                            "inlineData": {
+                                                "mimeType": m,
+                                                "data": d,
+                                            }
+                                        }
+                                    )
                         result_str = "\n".join(filter(None, text_items))
                     else:
                         result_str = str(result_content)
 
-                    # For Gemini models, if the matching tool_use was converted to text,
-                    # the tool_result must also be text to avoid functionResponse without functionCall.
-                    if is_gemini and tool_use_id not in valid_tool_call_ids:
-                        tool_name = _find_tool_name_by_id(
-                            messages, tool_use_id, signature_cache
-                        ) or "tool"
-                        parts.append(
-                            {"text": f"[Tool `{tool_name}` result]:\n{result_str}"}
-                        )
-                    else:
-                        part = {
-                            "functionResponse": {
-                                "name": _find_tool_name_by_id(
-                                    messages, tool_use_id, signature_cache
-                                )
-                                or "tool",
-                                "response": {"content": result_str},
-                                "id": tool_use_id,
-                            }
-                        }
-                        parts.append(part)
+                    if is_error:
+                        if not result_str.startswith("Error:") and not result_str.startswith("[ERROR]"):
+                            result_str = f"Error: {result_str}"
 
+                    resp_payload: dict[str, Any] = {"content": result_str}
+                    if is_error:
+                        resp_payload["error"] = True
+
+                    part = {
+                        "functionResponse": {
+                            "name": _find_tool_name_by_id(
+                                messages, tool_use_id, signature_cache
+                            )
+                            or "tool",
+                            "response": resp_payload,
+                            "id": tool_use_id or f"toolu_{uuid.uuid4().hex[:20]}",
+                        }
+                    }
+                    parts.append(part)
+                    parts.extend(media_parts)
         if parts:
             raw_turns.append({"role": gemini_role, "parts": parts})
 
@@ -401,9 +722,9 @@ def _build_contents(
     # Antigravity streamGenerateContent API requires first turn to be 'user' and last turn to be 'user'
     if merged:
         if merged[0]["role"] != "user":
-            merged.insert(0, {"role": "user", "parts": [{"text": "Hello"}]})
+            merged.insert(0, {"role": "user", "parts": [{"text": " "}]})
         if merged[-1]["role"] == "model":
-            merged.append({"role": "user", "parts": [{"text": "Please continue."}]})
+            merged.append({"role": "user", "parts": [{"text": " "}]})
 
     return merged
 
@@ -413,24 +734,42 @@ def _find_tool_name_by_id(
     tool_id: str,
     signature_cache: dict[str, str] | None = None,
 ) -> str | None:
-    for msg in messages:
+    if tool_id:
+        for msg in messages:
+            content = getattr(msg, "content", None) or (
+                msg.get("content") if isinstance(msg, dict) else None
+            )
+            if isinstance(content, list):
+                for block in content:
+                    bid = getattr(block, "id", None) or (
+                        block.get("id") if isinstance(block, dict) else ""
+                    )
+                    bname = getattr(block, "name", None) or (
+                        block.get("name") if isinstance(block, dict) else ""
+                    )
+                    if bid == tool_id and bname:
+                        return bname
+        if signature_cache:
+            cached_name = signature_cache.get(f"name_{tool_id}")
+            if cached_name:
+                return cached_name
+
+    # Fallback: match against the most recent tool_use in the conversation history
+    for msg in reversed(messages):
         content = getattr(msg, "content", None) or (
             msg.get("content") if isinstance(msg, dict) else None
         )
         if isinstance(content, list):
-            for block in content:
-                bid = getattr(block, "id", None) or (
-                    block.get("id") if isinstance(block, dict) else ""
+            for block in reversed(content):
+                btype = getattr(block, "type", None) or (
+                    block.get("type") if isinstance(block, dict) else ""
                 )
                 bname = getattr(block, "name", None) or (
                     block.get("name") if isinstance(block, dict) else ""
                 )
-                if bid == tool_id and bname:
+                if btype == "tool_use" and bname:
                     return bname
-    if signature_cache:
-        cached_name = signature_cache.get(f"name_{tool_id}")
-        if cached_name:
-            return cached_name
+
     return None
 
 
@@ -440,13 +779,14 @@ class AntigravityStreamTranslator:
     def __init__(
         self,
         public_model: str,
-        signature_cache: dict[str, str],
+        signature_cache: Any,
         *,
         input_tokens: int = 0,
     ) -> None:
         self.public_model = public_model
         self.signature_cache = signature_cache
         self.input_tokens = input_tokens
+        self.cache_read_tokens = 0
         self._message_id = f"msg_{uuid.uuid4().hex[:24]}"
         self._message_started = False
         self._current_block_index = -1
@@ -454,6 +794,7 @@ class AntigravityStreamTranslator:
         self._total_output_tokens = 0
         self._stop_reason = "end_turn"
         self._pending_sig: str | None = None
+        self._json_buffer = ""
 
     def process_line(self, line: str) -> list[str]:
         """Process one SSE line and return zero or more Anthropic SSE event frames."""
@@ -465,17 +806,48 @@ class AntigravityStreamTranslator:
         if not payload_str:
             return []
 
+        if self._json_buffer:
+            self._json_buffer += "\n" + payload_str
+        else:
+            self._json_buffer = payload_str
+
+        # Protect against unbounded stream buffer OOM
+        if len(self._json_buffer) > 5 * 1024 * 1024:
+            self._json_buffer = ""
+            raise ValueError("Antigravity SSE JSON buffer exceeded 5MB limit without valid JSON")
+
         try:
-            chunk = json.loads(payload_str)
+            chunk = json.loads(self._json_buffer)
+            self._json_buffer = ""
         except json.JSONDecodeError:
-            logger.debug("Failed to decode SSE JSON: {}", payload_str[:100])
+            # wait for more
             return []
 
         events: list[str] = []
 
+        resp = chunk.get("response", {})
+        candidates = resp.get("candidates", [])
+        usage_meta = resp.get("usageMetadata", {})
+        if usage_meta:
+            candidates_tokens = usage_meta.get("candidatesTokenCount")
+            if isinstance(candidates_tokens, int):
+                self._total_output_tokens = candidates_tokens
+            prompt_tokens = usage_meta.get("promptTokenCount")
+            if isinstance(prompt_tokens, int) and prompt_tokens > 0:
+                self.input_tokens = prompt_tokens
+            cached_tokens = usage_meta.get("cachedContentTokenCount")
+            if isinstance(cached_tokens, int) and cached_tokens > 0:
+                self.cache_read_tokens = cached_tokens
+
         # Start message on first valid payload
         if not self._message_started:
             self._message_started = True
+            msg_usage: dict[str, Any] = {
+                "input_tokens": self.input_tokens,
+                "output_tokens": 1,
+            }
+            if self.cache_read_tokens > 0:
+                msg_usage["cache_read_input_tokens"] = self.cache_read_tokens
             events.append(
                 format_sse_event(
                     "message_start",
@@ -489,22 +861,11 @@ class AntigravityStreamTranslator:
                             "content": [],
                             "stop_reason": None,
                             "stop_sequence": None,
-                            "usage": {
-                                "input_tokens": self.input_tokens,
-                                "output_tokens": 1,
-                            },
+                            "usage": msg_usage,
                         },
                     },
                 )
             )
-
-        resp = chunk.get("response", {})
-        candidates = resp.get("candidates", [])
-        usage_meta = resp.get("usageMetadata", {})
-        if usage_meta:
-            candidates_tokens = usage_meta.get("candidatesTokenCount")
-            if isinstance(candidates_tokens, int):
-                self._total_output_tokens = candidates_tokens
 
         for candidate in candidates:
             finish_reason = candidate.get("finishReason")
@@ -660,19 +1021,24 @@ class AntigravityStreamTranslator:
                             },
                         )
                     )
-                    events.append(
-                        format_sse_event(
-                            "content_block_delta",
-                            {
-                                "type": "content_block_delta",
-                                "index": self._current_block_index,
-                                "delta": {
-                                    "type": "input_json_delta",
-                                    "partial_json": json.dumps(fn_args),
+                    
+                    full_args = json.dumps(fn_args)
+                    chunk_size = 1024
+                    for i in range(0, len(full_args), chunk_size):
+                        events.append(
+                            format_sse_event(
+                                "content_block_delta",
+                                {
+                                    "type": "content_block_delta",
+                                    "index": self._current_block_index,
+                                    "delta": {
+                                        "type": "input_json_delta",
+                                        "partial_json": full_args[i:i + chunk_size],
+                                    },
                                 },
-                            },
+                            )
                         )
-                    )
+                        
                     events.append(
                         format_sse_event(
                             "content_block_stop",
@@ -721,6 +1087,12 @@ class AntigravityStreamTranslator:
                 )
             )
 
+        usage_dict: dict[str, Any] = {
+            "output_tokens": max(1, self._total_output_tokens),
+        }
+        if self.cache_read_tokens > 0:
+            usage_dict["cache_read_input_tokens"] = self.cache_read_tokens
+
         events.append(
             format_sse_event(
                 "message_delta",
@@ -730,9 +1102,7 @@ class AntigravityStreamTranslator:
                         "stop_reason": self._stop_reason,
                         "stop_sequence": None,
                     },
-                    "usage": {
-                        "output_tokens": max(1, self._total_output_tokens),
-                    },
+                    "usage": usage_dict,
                 },
             )
         )

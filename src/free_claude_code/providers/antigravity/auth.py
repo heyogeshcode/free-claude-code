@@ -40,7 +40,7 @@ from .login import (
     exchange_authorization_code,
 )
 
-REFRESH_EARLY_SECONDS = 5 * 60
+REFRESH_EARLY_SECONDS = 10 * 60
 DEFAULT_PROJECT_ID = "aicode-consumers"
 
 

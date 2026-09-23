@@ -5,6 +5,30 @@ from typing import Any
 from free_claude_code.application.model_metadata import ProviderModelInfo
 from free_claude_code.core.model_capabilities import ModelInputModality
 
+MODEL_GENERATION_DEFAULTS: dict[str, dict[str, object]] = {
+    "gemini-2.5-pro": {
+        "temperature": 1.0,
+        "topP": 0.95,
+        "topK": 64,
+    },
+    "gemini-2.5-flash": {
+        "temperature": 1.0,
+        "topP": 0.95,
+        "topK": 64,
+    },
+    "gemini-3.8-flash-tiered": {
+        "temperature": 1.0,
+        "topP": 0.95,
+        "topK": 64,
+    },
+    "claude-sonnet-4-6": {
+        "temperature": 1.0,
+    },
+    "claude-opus-4-6-thinking": {
+        "temperature": 1.0,
+    },
+}
+
 DEFAULT_MODELS_HOSTS = (
     "daily-cloudcode-pa.googleapis.com",
     "cloudcode-pa.googleapis.com",
@@ -129,46 +153,53 @@ DEFAULT_ANTIGRAVITY_MODELS: tuple[ProviderModelInfo, ...] = (
         max_output_tokens=65_536,
     ),
     ProviderModelInfo(
+        model_id="gemini-2.5-flash-lite",
+        supports_thinking=True,
+        input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
+        context_window_tokens=1_048_576,
+        max_output_tokens=65_536,
+    ),
+    ProviderModelInfo(
         model_id="claude-sonnet-4-6",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="claude-opus-4-6-thinking",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="opus-4.6",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="sonnet-4.6",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="claude-opus-4.6",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="claude-sonnet-4.6",
         supports_thinking=True,
         input_modalities=frozenset({ModelInputModality.TEXT, ModelInputModality.IMAGE}),
         context_window_tokens=200_000,
-        max_output_tokens=65_536,
+        max_output_tokens=64_000,
     ),
     ProviderModelInfo(
         model_id="gpt-oss-120b-medium",
@@ -266,7 +297,7 @@ def parse_antigravity_models(payload: dict[str, Any]) -> frozenset[ProviderModel
         max_output = (
             int(max_output_tokens)
             if isinstance(max_output_tokens, int) and max_output_tokens > 0
-            else 65_536
+            else 8192
         )
 
         # Add the exact upstream model ID

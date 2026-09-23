@@ -130,7 +130,7 @@ class MessagesRequest(BaseModel):
     top_k: int | None = None
     metadata: dict[str, Any] | None = None
     tools: list[Tool] | None = None
-    tool_choice: dict[str, Any] | None = None
+    tool_choice: dict[str, Any] | str | None = None
     thinking: ThinkingConfig | None = None
     context_management: dict[str, Any] | None = None
     output_config: dict[str, Any] | None = None

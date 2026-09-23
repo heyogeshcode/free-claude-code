@@ -195,9 +195,11 @@ def test_sanitize_schema_strips_unsupported_fields():
     assert sanitized["type"] == "OBJECT"
     assert "$schema" not in sanitized
     assert "title" not in sanitized
-    assert "additionalProperties" not in sanitized
+    assert sanitized["additionalProperties"] is False
     assert "required" in sanitized
-    assert sanitized["required"] == ["query"]  # non_existent_field stripped
+    assert "query" in sanitized["required"]
+    assert "non_existent_field" in sanitized["required"]
+    assert "non_existent_field" in sanitized["properties"]
     assert "propertyNames" not in sanitized["properties"]["options"]
     assert "patternProperties" not in sanitized["properties"]["options"]
     assert sanitized["properties"]["options"]["type"] == "OBJECT"
@@ -219,7 +221,7 @@ def test_sanitize_schema_handles_anyof_nullable():
     assert sanitized["description"] == "Optional string value"
 
 
-def test_gemini_tool_use_without_signature_falls_back_to_text():
+def test_gemini_tool_use_without_signature_remains_structured_function_call():
     tool = Tool(
         name="bash",
         description="Run bash command",
@@ -259,16 +261,18 @@ def test_gemini_tool_use_without_signature_falls_back_to_text():
 
     assert backend_model == "gemini-3.8-flash-tiered"
     contents = payload["request"]["contents"]
-    # Model turn should NOT contain raw functionCall without thoughtSignature
+    # Model turn MUST contain structured functionCall and never fall back to plain text
     model_turn = next(c for c in contents if c["role"] == "model")
-    assert "functionCall" not in model_turn["parts"][0]
-    assert "Calling tool `bash`" in model_turn["parts"][0]["text"]
+    assert "functionCall" in model_turn["parts"][0]
+    assert model_turn["parts"][0]["functionCall"]["name"] == "bash"
+    assert model_turn["parts"][0]["functionCall"]["args"] == {"command": "ls"}
 
-    # User turn following it should NOT contain raw functionResponse
+    # User turn following it MUST contain structured functionResponse
     user_turn = contents[-1]
     assert user_turn["role"] == "user"
-    assert "functionResponse" not in user_turn["parts"][-1]
-    assert "file1.txt" in user_turn["parts"][-1]["text"]
+    assert "functionResponse" in user_turn["parts"][-1]
+    assert user_turn["parts"][-1]["functionResponse"]["name"] == "bash"
+    assert user_turn["parts"][-1]["functionResponse"]["response"]["content"] == "file1.txt\nfile2.txt"
 
 
 def test_gemini_contents_boundary_constraints():

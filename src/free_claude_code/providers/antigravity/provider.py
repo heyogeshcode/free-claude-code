@@ -4,6 +4,7 @@ import asyncio
 import json
 import sys
 from collections.abc import AsyncIterator
+from collections import OrderedDict
 from typing import Any, cast
 
 import httpx
@@ -40,6 +41,50 @@ from .models import (
 )
 from .translator import AntigravityStreamTranslator, translate_messages_request
 
+class SignatureCache:
+    def __init__(self, max_size: int = 5000):
+        self._cache: OrderedDict[str, str] = OrderedDict()
+        self._max_size = max_size
+    
+    def get(self, key: str, default: Any = None) -> Any:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        return default
+    
+    def set(self, key: str, value: str) -> None:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+        self._cache[key] = value
+        while len(self._cache) > self._max_size:
+            self._cache.popitem(last=False)
+            
+    def __setitem__(self, key: str, value: str) -> None:
+        self.set(key, value)
+        
+    def __getitem__(self, key: str) -> str:
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        raise KeyError(key)
+
+    def __contains__(self, key: str) -> bool:
+        return key in self._cache
+
+    def __len__(self) -> int:
+        return len(self._cache)
+    
+    def items(self) -> Any:
+        return self._cache.items()
+    
+    def update(self, data: dict) -> None:
+        for k, v in data.items():
+            self.set(k, v)
+
+    def delete(self, key: str) -> None:
+        if key in self._cache:
+            del self._cache[key]
+
 
 class AntigravityProvider(BaseProvider):
     """Serve Google Antigravity models (Gemini 3.8 Flash, Claude Sonnet 4.6, etc.) to Claude Code & OpenCode."""
@@ -56,7 +101,13 @@ class AntigravityProvider(BaseProvider):
         self._auth = auth
         self._admission = admission
         self._signatures_path = antigravity_signatures_path()
-        self._signature_cache: dict[str, str] = self._load_signature_cache()
+        self._signature_cache: SignatureCache = self._load_signature_cache()
+        try:
+            import h2  # noqa: F401
+            has_h2 = True
+        except ImportError:
+            has_h2 = False
+
         self._client = client or httpx.AsyncClient(
             proxy=config.proxy,
             timeout=httpx.Timeout(
@@ -64,31 +115,31 @@ class AntigravityProvider(BaseProvider):
                 connect=config.http_connect_timeout,
                 write=config.http_write_timeout,
             ),
+            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20, keepalive_expiry=30),
+            http2=has_h2,
         )
         self._owns_client = client is None
         self._closing = False
 
-    def _load_signature_cache(self) -> dict[str, str]:
+    def _load_signature_cache(self) -> SignatureCache:
+        cache = SignatureCache(max_size=5000)
         if not self._signatures_path.exists():
-            return {}
+            return cache
         try:
             with open(self._signatures_path, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 if isinstance(data, dict):
-                    return {str(k): str(v) for k, v in data.items()}
+                    cache.update({str(k): str(v) for k, v in data.items()})
         except Exception as exc:
             logger.debug("Failed to load Antigravity signature cache: {}", exc)
-        return {}
+        return cache
 
     def _save_signature_cache(self) -> None:
         try:
             self._signatures_path.parent.mkdir(parents=True, exist_ok=True)
-            if len(self._signature_cache) > 2000:
-                items = list(self._signature_cache.items())[-2000:]
-                self._signature_cache = dict(items)
             temp_path = self._signatures_path.with_suffix(".tmp")
             with open(temp_path, "w", encoding="utf-8") as f:
-                json.dump(self._signature_cache, f)
+                json.dump(dict(self._signature_cache.items()), f)
             temp_path.replace(self._signatures_path)
         except Exception as exc:
             logger.debug("Failed to save Antigravity signature cache: {}", exc)
@@ -313,33 +364,109 @@ class AntigravityProvider(BaseProvider):
                             False,
                         )
                     detail = await response.aread()
+                    retry_after = response.headers.get("Retry-After")
                     await response.aclose()
+                    msg = f"Antigravity quota exhausted: {detail.decode('utf-8', errors='replace')[:200]}"
+                    if retry_after:
+                        msg += f" (Retry-After: {retry_after}s)"
                     raise ExecutionFailure(
                         FailureKind.RATE_LIMIT,
                         429,
-                        f"Antigravity quota exhausted: {detail.decode('utf-8', errors='replace')[:200]}",
+                        msg,
                         True,
                     )
 
                 if not response.is_success:
                     err_body = await response.aread()
                     await response.aclose()
-                    msg = err_body.decode("utf-8", errors="replace")[:300]
+                    msg = err_body.decode("utf-8", errors="replace")
+                    
+                    if response.status_code == 400:
+                        try:
+                            import re
+                            err_json = json.loads(msg)
+                            err_msg = err_json.get("error", {}).get("message", "")
+                            if "thoughtSignature" in err_msg or "signature mismatch" in err_msg.lower():
+                                logger.warning("Antigravity signature mismatch detected: {}", err_msg)
+                                match = re.search(r"tool[ _]call['\s]+([a-zA-Z0-9_-]+)", err_msg)
+                                if match:
+                                    call_id = match.group(1)
+                                    logger.warning("Clearing signature cache for tool call: {}", call_id)
+                                    self._signature_cache.delete(call_id)
+                                else:
+                                    logger.warning("Clearing entire signature cache due to unparseable tool call ID")
+                                    self._signature_cache._cache.clear()
+                        except Exception as e:
+                            logger.debug("Failed to parse 400 error body for signature mismatch: {}", e)
+
+                    msg_trunc = msg[:300]
                     raise ExecutionFailure(
                         FailureKind.UPSTREAM,
                         response.status_code,
-                        f"Antigravity error ({response.status_code}): {msg}",
+                        f"Antigravity error ({response.status_code}): {msg_trunc}",
                         response.status_code >= 500,
                     )
 
                 scope.retain(response)
 
-                async for line in response.aiter_lines():
-                    events = translator.process_line(line)
-                    if events and not attempt.accepted:
-                        await attempt.accept()
-                    for ev in events:
-                        yield ev
+                import asyncio
+                
+                q = asyncio.Queue()
+                
+                async def read_stream():
+                    try:
+                        async for chunk in response.aiter_bytes():
+                            await q.put(("chunk", chunk))
+                        await q.put(("done", None))
+                    except Exception as e:
+                        await q.put(("error", e))
+                        
+                reader_task = asyncio.create_task(read_stream())
+                
+                buffer = b""
+                is_thinking = False
+                
+                try:
+                    while True:
+                        try:
+                            msg_type, data = await asyncio.wait_for(q.get(), timeout=5.0)
+                            if msg_type == "done":
+                                break
+                            elif msg_type == "error":
+                                raise data
+                            elif msg_type == "chunk":
+                                buffer += data
+                                while b"\n" in buffer:
+                                    line_bytes, buffer = buffer.split(b"\n", 1)
+                                    try:
+                                        line = line_bytes.decode("utf-8")
+                                        events = translator.process_line(line)
+                                        if events and not attempt.accepted:
+                                            await attempt.accept()
+                                        for ev in events:
+                                            if '"type":"thinking"' in ev or '"type": "thinking"' in ev:
+                                                is_thinking = True
+                                            elif '"type":"text"' in ev or '"type": "text"' in ev:
+                                                is_thinking = False
+                                            yield ev
+                                    except Exception as e:
+                                        logger.debug("Skipping malformed SSE line: {}", e)
+                        except asyncio.TimeoutError:
+                            if is_thinking:
+                                yield ": heartbeat\n\n"
+                finally:
+                    reader_task.cancel()
+
+                if buffer:
+                    try:
+                        line = buffer.decode("utf-8", errors="replace")
+                        events = translator.process_line(line)
+                        if events and not attempt.accepted:
+                            await attempt.accept()
+                        for ev in events:
+                            yield ev
+                    except Exception as e:
+                        logger.debug("Skipping malformed SSE line: {}", e)
 
                 for ev in translator.finalize():
                     if not attempt.accepted:
@@ -461,8 +588,9 @@ def _sanitize_responses_request(
     # Strip unknown root-level fields like prompt_cache_key, client_metadata
     data = {k: v for k, v in raw_data.items() if k in _ALLOWED_REQUEST_FIELDS}
 
-    # 1. Truncation: only None or 'disabled' allowed
-    data.pop("truncation", None)
+    # 1. Truncation: only None or 'disabled' allowed by Messages converter
+    if "truncation" in data and data["truncation"] not in (None, "disabled"):
+        data.pop("truncation", None)
 
     # 2. Include: only 'reasoning.encrypted_content' allowed
     if "include" in data:
