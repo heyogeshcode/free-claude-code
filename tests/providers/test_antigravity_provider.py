@@ -434,3 +434,34 @@ def test_stream_translator_thinking_blocks():
     assert "message_delta" in joined3
     assert "message_stop" in joined3
 
+
+@pytest.mark.asyncio
+async def test_stream_messages_upstream_error_raises_execution_failure(provider_config):
+    """Verify that upstream failures correctly raise ExecutionFailure and do not fail with UnboundLocalError."""
+    auth = MagicMock(spec=AntigravityAuthManager)
+    auth.is_connected.return_value = True
+    auth.access = AsyncMock(
+        return_value=AntigravityAccess("ya29.test_token", "test_proj")
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, content=b"Rate limit exceeded", request=request)
+
+    client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+    provider = AntigravityProvider(
+        provider_config,
+        auth=auth,
+        admission=immediate_admission(),
+        client=client,
+    )
+    try:
+        req = make_messages_request("antigravity/gemini-3.8-flash")
+        with pytest.raises(ExecutionFailure) as exc_info:
+            async for _ in provider.stream_messages(req):
+                pass
+        assert exc_info.value.status_code == 429
+    finally:
+        await provider.cleanup()
+        await client.aclose()
+
+

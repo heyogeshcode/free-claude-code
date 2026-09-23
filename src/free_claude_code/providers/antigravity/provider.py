@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import sys
 from collections.abc import AsyncIterator
 from collections import OrderedDict
@@ -383,7 +384,6 @@ class AntigravityProvider(BaseProvider):
                     
                     if response.status_code == 400:
                         try:
-                            import re
                             err_json = json.loads(msg)
                             err_msg = err_json.get("error", {}).get("message", "")
                             if "thoughtSignature" in err_msg or "signature mismatch" in err_msg.lower():
@@ -409,8 +409,6 @@ class AntigravityProvider(BaseProvider):
 
                 scope.retain(response)
 
-                import asyncio
-                
                 q = asyncio.Queue()
                 
                 async def read_stream():
